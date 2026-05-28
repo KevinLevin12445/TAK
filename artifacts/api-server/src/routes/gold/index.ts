@@ -1,0 +1,40 @@
+import { Router } from "express";
+import priceRouter from "./price.js";
+import historyRouter from "./history.js";
+import vwapRouter from "./vwap.js";
+import volumeProfileRouter from "./volume-profile.js";
+import anomalyRouter from "./anomaly.js";
+import gc3dRouter from "./gc3d.js";
+import gc3dSurfaceRouter from "./gc3d-surface.js";
+import riskRouter from "./risk.js";
+import kalmanRouter from "./kalman.js";
+import hmmRouter from "./hmm.js";
+import heatmapRouter from "./heatmap.js";
+import orderFlowRouter from "./order-flow.js";
+import portfolioRouter from "./portfolio.js";
+import insiderRouter from "./insider.js";
+import alertsRouter from "./alerts.js";
+import quantRouter from "./quant.js";
+import factorFeaturesRouter from "./factor-features.js";
+
+const router = Router();
+
+router.use(priceRouter);
+router.use(historyRouter);
+router.use(vwapRouter);
+router.use(volumeProfileRouter);
+router.use(anomalyRouter);
+router.use(gc3dRouter);
+router.use(gc3dSurfaceRouter);
+router.use(riskRouter);
+router.use(kalmanRouter);
+router.use(hmmRouter);
+router.use(heatmapRouter);
+router.use(orderFlowRouter);
+router.use(portfolioRouter);
+router.use(insiderRouter);
+router.use(alertsRouter);
+router.use(quantRouter);
+router.use(factorFeaturesRouter);
+
+export default router;

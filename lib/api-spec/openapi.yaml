@@ -1,0 +1,915 @@
+openapi: 3.1.0
+info:
+  title: Api
+  version: 0.1.0
+  description: AK-INC Trading Terminal API
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: gold
+    description: Gold price & market data
+  - name: analytics
+    description: Technical analytics
+  - name: portfolio
+    description: Portfolio analytics
+  - name: insider
+    description: Insider trading data
+  - name: alerts
+    description: Live market alerts
+
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+
+  /gold/price:
+    get:
+      operationId: getGoldPrice
+      tags: [gold]
+      summary: Get current gold price with change data
+      responses:
+        "200":
+          description: Current gold price
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GoldPrice"
+
+  /gold/history:
+    get:
+      operationId: getGoldHistory
+      tags: [gold]
+      summary: Get OHLCV historical data with indicators
+      parameters:
+        - name: interval
+          in: query
+          schema:
+            type: string
+            default: "5m"
+        - name: period
+          in: query
+          schema:
+            type: string
+            default: "2d"
+      responses:
+        "200":
+          description: Historical OHLCV data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HistoryData"
+
+  /gold/vwap:
+    get:
+      operationId: getVwap
+      tags: [analytics]
+      summary: Get VWAP with standard deviation bands
+      parameters:
+        - name: interval
+          in: query
+          schema:
+            type: string
+            default: "5m"
+        - name: period
+          in: query
+          schema:
+            type: string
+            default: "2d"
+      responses:
+        "200":
+          description: VWAP data with bands
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VwapData"
+
+  /gold/volume-profile:
+    get:
+      operationId: getVolumeProfile
+      tags: [analytics]
+      summary: Get volume profile sessions analysis
+      parameters:
+        - name: interval
+          in: query
+          schema:
+            type: string
+            default: "15m"
+        - name: period
+          in: query
+          schema:
+            type: string
+            default: "5d"
+        - name: bins
+          in: query
+          schema:
+            type: integer
+            default: 22
+      responses:
+        "200":
+          description: Volume profile data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VolumeProfileData"
+
+  /gold/anomaly:
+    get:
+      operationId: getAnomaly
+      tags: [analytics]
+      summary: Get yield anomaly detection
+      parameters:
+        - name: period
+          in: query
+          schema:
+            type: string
+            default: "5d"
+        - name: window
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: threshold
+          in: query
+          schema:
+            type: number
+            default: 2.0
+      responses:
+        "200":
+          description: Anomaly detection data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnomalyData"
+
+  /gold/gc3d:
+    get:
+      operationId: getGc3d
+      tags: [analytics]
+      summary: Get GC3D 3D alpha surface data
+      parameters:
+        - name: feature
+          in: query
+          schema:
+            type: string
+            default: "stoch_volatility"
+        - name: period
+          in: query
+          schema:
+            type: string
+            default: "1mo"
+      responses:
+        "200":
+          description: 3D surface data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Gc3dData"
+
+  /gold/risk:
+    get:
+      operationId: getRiskMetrics
+      tags: [analytics]
+      summary: Get risk metrics including VaR, drawdown, Sharpe
+      responses:
+        "200":
+          description: Risk metrics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RiskMetrics"
+
+  /gold/kalman:
+    get:
+      operationId: getKalman
+      tags: [analytics]
+      summary: Get Kalman filter trend estimate
+      parameters:
+        - name: period
+          in: query
+          schema:
+            type: string
+            default: "1mo"
+      responses:
+        "200":
+          description: Kalman filter data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KalmanData"
+
+  /gold/hmm:
+    get:
+      operationId: getHmmRegimes
+      tags: [analytics]
+      summary: Get HMM regime detection
+      parameters:
+        - name: period
+          in: query
+          schema:
+            type: string
+            default: "3mo"
+      responses:
+        "200":
+          description: HMM regime data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HmmData"
+
+  /gold/heatmap:
+    get:
+      operationId: getHeatmap
+      tags: [analytics]
+      summary: Get equity heatmap for gold-related assets
+      responses:
+        "200":
+          description: Heatmap data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HeatmapData"
+
+  /gold/portfolio:
+    get:
+      operationId: getPortfolio
+      tags: [portfolio]
+      summary: Get Markowitz portfolio optimization for gold-related assets
+      responses:
+        "200":
+          description: Portfolio data with Markowitz frontier
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PortfolioData"
+
+  /gold/insider:
+    get:
+      operationId: getInsider
+      tags: [insider]
+      summary: Get insider trading activity (SEC EDGAR Form 4)
+      responses:
+        "200":
+          description: Insider trading data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InsiderData"
+
+  /gold/alerts:
+    get:
+      operationId: getAlerts
+      tags: [alerts]
+      summary: Get live market alerts and news feed
+      responses:
+        "200":
+          description: Live alerts
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AlertsData"
+
+  /gold/quant:
+    get:
+      operationId: getQuantPanel
+      tags: [analytics]
+      summary: Get quant panel summary metrics
+      responses:
+        "200":
+          description: Quant panel data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuantPanelData"
+
+  /gold/factor-features:
+    get:
+      operationId: getFactorFeatures
+      tags: [analytics]
+      summary: Get factor features (zscore, vwap_dev, stochvol, order imbalance, etc.)
+      responses:
+        "200":
+          description: Factor features data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FactorFeaturesData"
+
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      required: [status]
+
+    GoldPrice:
+      type: object
+      properties:
+        price:
+          type: number
+        change:
+          type: number
+        changePct:
+          type: number
+        high:
+          type: number
+        low:
+          type: number
+        open:
+          type: number
+        volume:
+          type: number
+        timestamp:
+          type: string
+        prevClose:
+          type: number
+      required: [price, change, changePct, timestamp]
+
+    Candle:
+      type: object
+      properties:
+        time:
+          type: string
+        open:
+          type: number
+        high:
+          type: number
+        low:
+          type: number
+        close:
+          type: number
+        volume:
+          type: number
+        sma20:
+          type: ["number", "null"]
+        sma50:
+          type: ["number", "null"]
+        rsi:
+          type: ["number", "null"]
+      required: [time, open, high, low, close, volume]
+
+    HistoryData:
+      type: object
+      properties:
+        candles:
+          type: array
+          items:
+            $ref: "#/components/schemas/Candle"
+        ticker:
+          type: string
+        interval:
+          type: string
+        period:
+          type: string
+      required: [candles, ticker, interval, period]
+
+    VwapPoint:
+      type: object
+      properties:
+        time:
+          type: string
+        price:
+          type: number
+        vwapSession:
+          type: ["number", "null"]
+        vwapTotal:
+          type: ["number", "null"]
+        sd1p:
+          type: ["number", "null"]
+        sd1n:
+          type: ["number", "null"]
+        sd2p:
+          type: ["number", "null"]
+        sd2n:
+          type: ["number", "null"]
+        sd3p:
+          type: ["number", "null"]
+        sd3n:
+          type: ["number", "null"]
+        sd4p:
+          type: ["number", "null"]
+        sd4n:
+          type: ["number", "null"]
+      required: [time, price]
+
+    VwapData:
+      type: object
+      properties:
+        points:
+          type: array
+          items:
+            $ref: "#/components/schemas/VwapPoint"
+        currentPrice:
+          type: number
+        vwapSession:
+          type: number
+        vwapTotal:
+          type: number
+        ticker:
+          type: string
+      required: [points, currentPrice, vwapSession, vwapTotal, ticker]
+
+    VolumeProfileBin:
+      type: object
+      properties:
+        price:
+          type: number
+        buyVol:
+          type: number
+        sellVol:
+          type: number
+        volume:
+          type: number
+        poc:
+          type: boolean
+        vah:
+          type: boolean
+        val:
+          type: boolean
+      required: [price, buyVol, sellVol, volume, poc, vah, val]
+
+    VolumeProfileData:
+      type: object
+      properties:
+        profile:
+          type: array
+          items:
+            $ref: "#/components/schemas/VolumeProfileBin"
+        poc:
+          type: number
+        vah:
+          type: number
+        val:
+          type: number
+        ticker:
+          type: string
+        currentPrice:
+          type: number
+      required: [profile, poc, vah, val, ticker, currentPrice]
+
+    AnomalyPoint:
+      type: object
+      properties:
+        time:
+          type: string
+        return_:
+          type: number
+        anomalyUp:
+          type: boolean
+        anomalyDown:
+          type: boolean
+        zscore:
+          type: number
+      required: [time, return_, anomalyUp, anomalyDown, zscore]
+
+    AnomalyData:
+      type: object
+      properties:
+        ms5:
+          type: array
+          items:
+            $ref: "#/components/schemas/AnomalyPoint"
+        ms15:
+          type: array
+          items:
+            $ref: "#/components/schemas/AnomalyPoint"
+        log:
+          type: array
+          items:
+            type: object
+            properties:
+              time:
+                type: string
+              scale:
+                type: string
+              value:
+                type: number
+            required: [time, scale, value]
+        ticker:
+          type: string
+      required: [ms5, ms15, log, ticker]
+
+    Gc3dPoint:
+      type: object
+      properties:
+        time:
+          type: string
+        price:
+          type: number
+        featureValue:
+          type: number
+      required: [time, price, featureValue]
+
+    Gc3dData:
+      type: object
+      properties:
+        points:
+          type: array
+          items:
+            $ref: "#/components/schemas/Gc3dPoint"
+        feature:
+          type: string
+        features:
+          type: array
+          items:
+            type: object
+            properties:
+              key:
+                type: string
+              label:
+                type: string
+            required: [key, label]
+        ticker:
+          type: string
+        currentPrice:
+          type: number
+      required: [points, feature, features, ticker, currentPrice]
+
+    RiskMetrics:
+      type: object
+      properties:
+        var95:
+          type: number
+        expectedShortfall:
+          type: number
+        maxDrawdown:
+          type: number
+        currentDrawdown:
+          type: number
+        annualVol:
+          type: number
+        sharpeRatio:
+          type: number
+        yieldAnomaly:
+          type: number
+        carry:
+          type: number
+        orderImbalance:
+          type: number
+        coinZscore:
+          type: number
+        vwapDev:
+          type: number
+        stochVol:
+          type: number
+        zscore20:
+          type: number
+        zscore60:
+          type: number
+      required: [var95, expectedShortfall, maxDrawdown, currentDrawdown, annualVol, sharpeRatio]
+
+    KalmanPoint:
+      type: object
+      properties:
+        time:
+          type: string
+        price:
+          type: number
+        trend:
+          type: number
+        upper:
+          type: number
+        lower:
+          type: number
+      required: [time, price, trend, upper, lower]
+
+    KalmanData:
+      type: object
+      properties:
+        points:
+          type: array
+          items:
+            $ref: "#/components/schemas/KalmanPoint"
+        currentTrend:
+          type: number
+        signal:
+          type: string
+        ticker:
+          type: string
+      required: [points, currentTrend, signal, ticker]
+
+    HmmPoint:
+      type: object
+      properties:
+        time:
+          type: string
+        price:
+          type: number
+        regime:
+          type: integer
+        regimeLabel:
+          type: string
+      required: [time, price, regime, regimeLabel]
+
+    HmmData:
+      type: object
+      properties:
+        points:
+          type: array
+          items:
+            $ref: "#/components/schemas/HmmPoint"
+        currentRegime:
+          type: integer
+        currentLabel:
+          type: string
+        regimes:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: integer
+              label:
+                type: string
+              color:
+                type: string
+              pct:
+                type: number
+            required: [id, label, color, pct]
+        ticker:
+          type: string
+      required: [points, currentRegime, currentLabel, regimes, ticker]
+
+    HeatmapAsset:
+      type: object
+      properties:
+        ticker:
+          type: string
+        name:
+          type: string
+        changePct:
+          type: number
+        marketCap:
+          type: number
+        sector:
+          type: string
+        price:
+          type: number
+      required: [ticker, name, changePct, sector, price]
+
+    HeatmapData:
+      type: object
+      properties:
+        assets:
+          type: array
+          items:
+            $ref: "#/components/schemas/HeatmapAsset"
+        goldPrice:
+          type: number
+        goldChangePct:
+          type: number
+        countryPerf:
+          type: array
+          items:
+            type: object
+            properties:
+              country:
+                type: string
+              code:
+                type: string
+              changePct:
+                type: number
+              lat:
+                type: number
+              lng:
+                type: number
+            required: [country, code, changePct, lat, lng]
+      required: [assets, goldPrice, goldChangePct, countryPerf]
+
+    PortfolioAsset:
+      type: object
+      properties:
+        ticker:
+          type: string
+        name:
+          type: string
+        weight:
+          type: number
+        expectedReturn:
+          type: number
+        volatility:
+          type: number
+        sharpe:
+          type: number
+        price:
+          type: number
+        changePct:
+          type: number
+      required: [ticker, name, weight, expectedReturn, volatility, sharpe, price, changePct]
+
+    EfficientFrontierPoint:
+      type: object
+      properties:
+        risk:
+          type: number
+        return_:
+          type: number
+        sharpe:
+          type: number
+      required: [risk, return_, sharpe]
+
+    PortfolioData:
+      type: object
+      properties:
+        assets:
+          type: array
+          items:
+            $ref: "#/components/schemas/PortfolioAsset"
+        frontier:
+          type: array
+          items:
+            $ref: "#/components/schemas/EfficientFrontierPoint"
+        optimalPortfolio:
+          $ref: "#/components/schemas/EfficientFrontierPoint"
+        portfolioReturn:
+          type: number
+        portfolioVol:
+          type: number
+        portfolioSharpe:
+          type: number
+        correlationMatrix:
+          type: array
+          items:
+            type: array
+            items:
+              type: number
+        tickers:
+          type: array
+          items:
+            type: string
+      required: [assets, frontier, optimalPortfolio, portfolioReturn, portfolioVol, portfolioSharpe, correlationMatrix, tickers]
+
+    InsiderTransaction:
+      type: object
+      properties:
+        date:
+          type: string
+        ticker:
+          type: string
+        insider:
+          type: string
+        role:
+          type: string
+        type:
+          type: string
+        value:
+          type: string
+        shares:
+          type: ["integer", "null"]
+      required: [date, ticker, insider, role, type, value]
+
+    InsiderData:
+      type: object
+      properties:
+        signal:
+          type: string
+        score:
+          type: number
+        momentum:
+          type: number
+        buys:
+          type: integer
+        sells:
+          type: integer
+        buyClusters:
+          type: integer
+        transactions:
+          type: array
+          items:
+            $ref: "#/components/schemas/InsiderTransaction"
+        netFlow:
+          type: array
+          items:
+            type: object
+            properties:
+              date:
+                type: string
+              cumulative:
+                type: number
+            required: [date, cumulative]
+        factorFeatures:
+          $ref: "#/components/schemas/FactorFeaturesData"
+      required: [signal, score, momentum, buys, sells, buyClusters, transactions, netFlow]
+
+    AlertItem:
+      type: object
+      properties:
+        id:
+          type: string
+        level:
+          type: string
+        type:
+          type: string
+        time:
+          type: string
+        title:
+          type: string
+        body:
+          type: string
+        source:
+          type: string
+        ticker:
+          type: string
+      required: [id, level, type, time, title, body, source]
+
+    AlertsData:
+      type: object
+      properties:
+        alerts:
+          type: array
+          items:
+            $ref: "#/components/schemas/AlertItem"
+        news:
+          type: array
+          items:
+            type: object
+            properties:
+              title:
+                type: string
+              url:
+                type: string
+              source:
+                type: string
+              publishedAt:
+                type: string
+            required: [title, source, publishedAt]
+      required: [alerts, news]
+
+    QuantPanelData:
+      type: object
+      properties:
+        price:
+          type: number
+        change:
+          type: number
+        changePct:
+          type: number
+        rsi14:
+          type: number
+        sma20:
+          type: number
+        sma50:
+          type: number
+        sma200:
+          type: number
+        atr14:
+          type: number
+        bbUpper:
+          type: number
+        bbLower:
+          type: number
+        bbMid:
+          type: number
+        macd:
+          type: number
+        macdSignal:
+          type: number
+        macdHist:
+          type: number
+        stochK:
+          type: number
+        stochD:
+          type: number
+        obv:
+          type: number
+        momentum10:
+          type: number
+        trend:
+          type: string
+        signal:
+          type: string
+      required: [price, change, changePct, rsi14, sma20, sma50, trend, signal]
+
+    FactorFeaturesData:
+      type: object
+      properties:
+        zscore20:
+          type: number
+        zscore60:
+          type: number
+        vwapDev:
+          type: number
+        stochVol:
+          type: number
+        orderImbalance:
+          type: number
+        coinZscore:
+          type: number
+        yieldAnomaly:
+          type: number
+        carry:
+          type: number
+      required: [zscore20, zscore60, vwapDev, stochVol, orderImbalance, coinZscore, yieldAnomaly, carry]
