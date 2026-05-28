@@ -6,10 +6,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc g++ gfortran libopenblas-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY terminal/requirements.txt ./requirements.txt
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY terminal/ .
+COPY . .
 
 EXPOSE 8080
 
