@@ -1,6 +1,17 @@
+<<<<<<< HEAD
 node_modules
 dist
 .env
 .env.local
 .pnpm-store
 
+=======
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+.vscode/
+>>>>>>> ae146f7678a5dea6c9cfc2a77ede162c73c2c69f
