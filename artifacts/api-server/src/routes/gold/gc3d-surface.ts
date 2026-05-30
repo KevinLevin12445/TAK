@@ -96,7 +96,7 @@ router.get("/gc3d-surface", async (req, res) => {
 
     const dates = bars.map((b) => b.time.slice(0, 10));
 
-    res.json({
+    return res.json({
       matrix,
       rawMatrix,
       featureLabels: SURFACE_FEATURES.map((f) => f.label),
@@ -107,7 +107,7 @@ router.get("/gc3d-surface", async (req, res) => {
     });
   } catch (err) {
     req.log.error({ err }, "Error fetching gc3d-surface");
-    res.status(500).json({ error: "Failed to fetch surface" });
+    return res.status(500).json({ error: "Failed to fetch surface" });
   }
 });
 

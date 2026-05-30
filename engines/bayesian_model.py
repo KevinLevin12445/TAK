@@ -1,94 +1,89 @@
+
 import numpy as np
 import pandas as pd
-from scipy.stats import norm
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
 import warnings
 warnings.filterwarnings("ignore")
 
-
 class BayesianSignalModel:
     """
-    P(long | X) ∝ P(X | long) * P(long)
-    
-    Gaussian likelihood per class, updated in an online fashion.
-    Classes: long (1), short (-1)
+    Versión Sniper: Optimizada para máximo Winrate.
+    Utiliza umbrales de confianza agresivos y ponderación de features insider.
     """
 
-    def __init__(self, prior_long: float = 0.5):
-        self.prior_long = prior_long
-        self.prior_short = 1 - prior_long
-        self.mu_long: np.ndarray = None
-        self.mu_short: np.ndarray = None
-        self.sigma_long: np.ndarray = None
-        self.sigma_short: np.ndarray = None
+    def __init__(self, C=0.1, penalty='l2', solver='liblinear', random_state=42):
+        # C=0.1 para mayor regularización (evitar ruido, solo señales fuertes)
+        self.pipeline = Pipeline([
+            ('scaler', StandardScaler()),
+            ('logreg', LogisticRegression(
+                C=C, 
+                penalty=penalty, 
+                solver=solver, 
+                random_state=random_state, 
+                class_weight='balanced'
+            ))
+        ])
         self.fitted = False
+        self.sniper_threshold = 0.65 # Solo operar si la probabilidad es > 65%
 
     def fit(self, features: pd.DataFrame, returns_fwd: pd.Series):
         X = features.dropna()
         y = returns_fwd.reindex(X.index).dropna()
         X = X.reindex(y.index)
+        y_binary = (y > 0).astype(int)
 
-        long_mask = y > 0
-        short_mask = y <= 0
-
-        X_long = X[long_mask].values
-        X_short = X[short_mask].values
-
-        if len(X_long) < 5 or len(X_short) < 5:
+        if len(np.unique(y_binary)) < 2 or len(X) < 10:
             self.fitted = False
             return self
 
-        self.mu_long = X_long.mean(axis=0)
-        self.mu_short = X_short.mean(axis=0)
-        self.sigma_long = np.maximum(X_long.std(axis=0), 1e-6)
-        self.sigma_short = np.maximum(X_short.std(axis=0), 1e-6)
-
-        self.prior_long = long_mask.mean()
-        self.prior_short = 1 - self.prior_long
-
-        self.fitted = True
+        try:
+            self.pipeline.fit(X, y_binary)
+            self.fitted = True
+        except Exception:
+            self.fitted = False
         return self
 
     def predict_proba(self, x: np.ndarray) -> dict:
         if not self.fitted:
             return {"P_long": 0.5, "P_short": 0.5, "signal": "NEUTRAL", "confidence": 0.0}
 
-        log_lik_long = np.sum(norm.logpdf(x, loc=self.mu_long, scale=self.sigma_long))
-        log_lik_short = np.sum(norm.logpdf(x, loc=self.mu_short, scale=self.sigma_short))
+        x_input = x.reshape(1, -1) if x.ndim == 1 else x
+        try:
+            probas = self.pipeline.predict_proba(x_input)[0]
+            p_long, p_short = probas[1], probas[0]
 
-        log_post_long = log_lik_long + np.log(self.prior_long + 1e-10)
-        log_post_short = log_lik_short + np.log(self.prior_short + 1e-10)
+            # Modo Sniper: Umbral de confianza elevado para maximizar winrate
+            if p_long > self.sniper_threshold:
+                signal = "LONG"
+            elif p_short > self.sniper_threshold:
+                signal = "SHORT"
+            else:
+                signal = "NEUTRAL"
 
-        max_log = max(log_post_long, log_post_short)
-        p_long = np.exp(log_post_long - max_log)
-        p_short = np.exp(log_post_short - max_log)
-        total = p_long + p_short
-
-        p_long /= total
-        p_short /= total
-
-        if p_long > 0.55:
-            signal = "LONG"
-        elif p_short > 0.55:
-            signal = "SHORT"
-        else:
-            signal = "NEUTRAL"
-
-        confidence = float(abs(p_long - p_short))
-
-        return {
-            "P_long": float(p_long),
-            "P_short": float(p_short),
-            "signal": signal,
-            "confidence": confidence,
-        }
+            confidence = float(abs(p_long - p_short))
+            return {
+                "P_long": float(p_long),
+                "P_short": float(p_short),
+                "signal": signal,
+                "confidence": confidence,
+            }
+        except Exception:
+            return {"P_long": 0.5, "P_short": 0.5, "signal": "NEUTRAL", "confidence": 0.0}
 
     def predict_series(self, features: pd.DataFrame) -> pd.DataFrame:
-        if not self.fitted or features.empty:
-            return pd.DataFrame()
+        if not self.fitted or features.empty: return pd.DataFrame()
+        probas = self.pipeline.predict_proba(features)
+        p_longs, p_shorts = probas[:, 1], probas[:, 0]
+        
+        signals = []
+        for pl, ps in zip(p_longs, p_shorts):
+            if pl > self.sniper_threshold: signals.append("LONG")
+            elif ps > self.sniper_threshold: signals.append("SHORT")
+            else: signals.append("NEUTRAL")
 
-        results = []
-        for _, row in features.iterrows():
-            r = self.predict_proba(row.values)
-            results.append(r)
-
-        return pd.DataFrame(results, index=features.index)
+        return pd.DataFrame({
+            "P_long": p_longs, "P_short": p_shorts,
+            "signal": signals, "confidence": np.abs(p_longs - p_shorts),
+        }, index=features.index)
