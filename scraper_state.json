@@ -1,0 +1,469 @@
+{
+  "timestamp": "2026-05-30T09:01:54.428005",
+  "ticker": "GLD",
+  "signal": "STRONG BULLISH",
+  "current_score": 3437572.7816844643,
+  "option_flow_score": 0.06257676,
+  "dark_pool_score": 1.0,
+  "combined_score": 1375029.4314468137,
+  "momentum": -1081741.8849889738,
+  "n_transactions": 68,
+  "n_buys": 29,
+  "n_sells": 39,
+  "n_option_trades": 15,
+  "n_dark_pool_prints": 12,
+  "data_source": "SEC EDGAR + Mock Insider Finance (Updated: 09:01:54)",
+  "transactions": [
+    {
+      "timestamp": "2026-05-22T00:00:00",
+      "ticker": "GOLD",
+      "insider": "TETHER GLOBAL INVESTMENTS FUND, S.I.C.A.F., S.A.",
+      "role": "10pct_owner",
+      "type": "BUY",
+      "value": 2523528
+    },
+    {
+      "timestamp": "2026-05-21T00:00:00",
+      "ticker": "GOLD",
+      "insider": "TETHER GLOBAL INVESTMENTS FUND, S.I.C.A.F., S.A.",
+      "role": "10pct_owner",
+      "type": "BUY",
+      "value": 5719102
+    },
+    {
+      "timestamp": "2026-05-14T00:00:00",
+      "ticker": "NEM",
+      "insider": "LEYVA DEBORAH",
+      "role": "Other",
+      "type": "BUY",
+      "value": 1
+    },
+    {
+      "timestamp": "2026-05-13T00:00:00",
+      "ticker": "NEM",
+      "insider": "MADERO GARZA JOSE MANUEL",
+      "role": "Director",
+      "type": "BUY",
+      "value": 1
+    },
+    {
+      "timestamp": "2026-05-13T00:00:00",
+      "ticker": "GOLD",
+      "insider": "ROBERTS GREGORY N",
+      "role": "CEO",
+      "type": "SELL",
+      "value": 65200
+    },
+    {
+      "timestamp": "2026-05-13T00:00:00",
+      "ticker": "NEM",
+      "insider": "CLARK MAURA J",
+      "role": "Director",
+      "type": "BUY",
+      "value": 1
+    },
+    {
+      "timestamp": "2026-05-13T00:00:00",
+      "ticker": "NEM",
+      "insider": "CONGER HARRY M IV",
+      "role": "Director",
+      "type": "BUY",
+      "value": 1
+    },
+    {
+      "timestamp": "2026-05-13T00:00:00",
+      "ticker": "NEM",
+      "insider": "BOYCE GREGORY H",
+      "role": "Director",
+      "type": "BUY",
+      "value": 1
+    },
+    {
+      "timestamp": "2026-05-13T00:00:00",
+      "ticker": "NEM",
+      "insider": "MEDORI RENE",
+      "role": "Director",
+      "type": "BUY",
+      "value": 1
+    },
+    {
+      "timestamp": "2026-05-13T00:00:00",
+      "ticker": "NEM",
+      "insider": "FITZGERALD EMMA",
+      "role": "Director",
+      "type": "BUY",
+      "value": 1
+    },
+    {
+      "timestamp": "2026-05-13T00:00:00",
+      "ticker": "GOLD",
+      "insider": "SAVILLE KENDALL",
+      "role": "Director",
+      "type": "SELL",
+      "value": 107220
+    },
+    {
+      "timestamp": "2026-05-13T00:00:00",
+      "ticker": "NEM",
+      "insider": "SEATON DAVID THOMAS",
+      "role": "Director",
+      "type": "BUY",
+      "value": 1
+    },
+    {
+      "timestamp": "2026-05-13T00:00:00",
+      "ticker": "NEM",
+      "insider": "BROOK BRUCE R",
+      "role": "Director",
+      "type": "BUY",
+      "value": 1
+    },
+    {
+      "timestamp": "2026-05-13T00:00:00",
+      "ticker": "NEM",
+      "insider": "NELSON JANE",
+      "role": "Director",
+      "type": "BUY",
+      "value": 1
+    },
+    {
+      "timestamp": "2026-05-13T00:00:00",
+      "ticker": "NEM",
+      "insider": "LAYMAN SALLY-ANNE",
+      "role": "Director",
+      "type": "BUY",
+      "value": 1
+    },
+    {
+      "timestamp": "2026-05-13T00:00:00",
+      "ticker": "NEM",
+      "insider": "QUINTANA JULIO MANUEL",
+      "role": "Director",
+      "type": "BUY",
+      "value": 1
+    },
+    {
+      "timestamp": "2026-05-13T00:00:00",
+      "ticker": "GOLD",
+      "insider": "ROBERTS GREGORY N",
+      "role": "CEO",
+      "type": "SELL",
+      "value": 1663236
+    },
+    {
+      "timestamp": "2026-05-12T00:00:00",
+      "ticker": "GOLD",
+      "insider": "ROBERTS GREGORY N",
+      "role": "CEO",
+      "type": "SELL",
+      "value": 97800
+    },
+    {
+      "timestamp": "2026-05-12T00:00:00",
+      "ticker": "GOLD",
+      "insider": "ROBERTS GREGORY N",
+      "role": "CEO",
+      "type": "SELL",
+      "value": 2612721
+    },
+    {
+      "timestamp": "2026-05-05T00:00:00",
+      "ticker": "GOLD",
+      "insider": "TETHER GLOBAL INVESTMENTS FUND, S.I.C.A.F., S.A.",
+      "role": "10pct_owner",
+      "type": "BUY",
+      "value": 23600041
+    }
+  ],
+  "option_flow": [
+    {
+      "date": "05-30",
+      "time": "09:01",
+      "type": "Call",
+      "expiry": "06-21",
+      "strike": 4688,
+      "price": 3.38,
+      "size": 4781,
+      "premium": 347.32,
+      "heat_score": 52.6
+    },
+    {
+      "date": "05-30",
+      "time": "08:01",
+      "type": "Call",
+      "expiry": "07-18",
+      "strike": 4527,
+      "price": 0.6,
+      "size": 2762,
+      "premium": 835.55,
+      "heat_score": 81.6
+    },
+    {
+      "date": "05-30",
+      "time": "07:01",
+      "type": "Put",
+      "expiry": "07-18",
+      "strike": 4329,
+      "price": 2.69,
+      "size": 3636,
+      "premium": 1823.76,
+      "heat_score": 81.3
+    },
+    {
+      "date": "05-30",
+      "time": "06:01",
+      "type": "Put",
+      "expiry": "06-21",
+      "strike": 4366,
+      "price": 2.76,
+      "size": 514,
+      "premium": 4005.35,
+      "heat_score": 22.2
+    },
+    {
+      "date": "05-30",
+      "time": "05:01",
+      "type": "Call",
+      "expiry": "06-21",
+      "strike": 4427,
+      "price": 4.59,
+      "size": 1334,
+      "premium": 2727.5,
+      "heat_score": 26.5
+    },
+    {
+      "date": "05-30",
+      "time": "04:01",
+      "type": "Call",
+      "expiry": "07-18",
+      "strike": 4403,
+      "price": 4.06,
+      "size": 4801,
+      "premium": 1167.74,
+      "heat_score": 46.9
+    },
+    {
+      "date": "05-30",
+      "time": "03:01",
+      "type": "Put",
+      "expiry": "06-21",
+      "strike": 4408,
+      "price": 1.12,
+      "size": 3434,
+      "premium": 2576.24,
+      "heat_score": 40.8
+    },
+    {
+      "date": "05-30",
+      "time": "02:01",
+      "type": "Put",
+      "expiry": "06-21",
+      "strike": 4323,
+      "price": 1.52,
+      "size": 2543,
+      "premium": 642.91,
+      "heat_score": 37.3
+    },
+    {
+      "date": "05-30",
+      "time": "01:01",
+      "type": "Put",
+      "expiry": "07-18",
+      "strike": 4358,
+      "price": 3.77,
+      "size": 1379,
+      "premium": 3010.19,
+      "heat_score": 37.4
+    },
+    {
+      "date": "05-30",
+      "time": "00:01",
+      "type": "Call",
+      "expiry": "07-18",
+      "strike": 4512,
+      "price": 1.31,
+      "size": 348,
+      "premium": 3431.07,
+      "heat_score": 56.7
+    },
+    {
+      "date": "05-29",
+      "time": "23:01",
+      "type": "Call",
+      "expiry": "07-18",
+      "strike": 4533,
+      "price": 4.23,
+      "size": 858,
+      "premium": 988.81,
+      "heat_score": 24.9
+    },
+    {
+      "date": "05-29",
+      "time": "22:01",
+      "type": "Call",
+      "expiry": "06-21",
+      "strike": 4621,
+      "price": 2.11,
+      "size": 2814,
+      "premium": 458.53,
+      "heat_score": 28.2
+    },
+    {
+      "date": "05-29",
+      "time": "21:01",
+      "type": "Call",
+      "expiry": "06-21",
+      "strike": 4689,
+      "price": 1.55,
+      "size": 426,
+      "premium": 4046.86,
+      "heat_score": 70.0
+    },
+    {
+      "date": "05-29",
+      "time": "20:01",
+      "type": "Call",
+      "expiry": "06-21",
+      "strike": 4336,
+      "price": 2.0,
+      "size": 1393,
+      "premium": 552.64,
+      "heat_score": 90.0
+    },
+    {
+      "date": "05-29",
+      "time": "19:01",
+      "type": "Call",
+      "expiry": "07-18",
+      "strike": 4429,
+      "price": 2.34,
+      "size": 2918,
+      "premium": 851.61,
+      "heat_score": 70.7
+    }
+  ],
+  "dark_pool": [
+    {
+      "date": "05-30",
+      "time": "09:01:54",
+      "price": 4460,
+      "size": 39537,
+      "amount": 725105.0,
+      "pool_type": "Dark"
+    },
+    {
+      "date": "05-30",
+      "time": "08:56:54",
+      "price": 4455,
+      "size": 9352,
+      "amount": 885925.0,
+      "pool_type": "Dark"
+    },
+    {
+      "date": "05-30",
+      "time": "08:51:54",
+      "price": 4537,
+      "size": 26638,
+      "amount": 1267073.0,
+      "pool_type": "Dark"
+    },
+    {
+      "date": "05-30",
+      "time": "08:46:54",
+      "price": 4480,
+      "size": 42281,
+      "amount": 409766.0,
+      "pool_type": "Dark"
+    },
+    {
+      "date": "05-30",
+      "time": "08:41:54",
+      "price": 4487,
+      "size": 49262,
+      "amount": 1079177.0,
+      "pool_type": "Dark"
+    },
+    {
+      "date": "05-30",
+      "time": "08:36:54",
+      "price": 4543,
+      "size": 42585,
+      "amount": 1418993.0,
+      "pool_type": "Dark"
+    },
+    {
+      "date": "05-30",
+      "time": "08:31:54",
+      "price": 4528,
+      "size": 37716,
+      "amount": 1756259.0,
+      "pool_type": "Dark"
+    },
+    {
+      "date": "05-30",
+      "time": "08:26:54",
+      "price": 4528,
+      "size": 14981,
+      "amount": 326396.0,
+      "pool_type": "Dark"
+    },
+    {
+      "date": "05-30",
+      "time": "08:21:54",
+      "price": 4516,
+      "size": 30802,
+      "amount": 648817.0,
+      "pool_type": "Dark"
+    },
+    {
+      "date": "05-30",
+      "time": "08:16:54",
+      "price": 4531,
+      "size": 30412,
+      "amount": 1946671.0,
+      "pool_type": "Dark"
+    },
+    {
+      "date": "05-30",
+      "time": "08:11:54",
+      "price": 4530,
+      "size": 34736,
+      "amount": 1692745.0,
+      "pool_type": "Dark"
+    },
+    {
+      "date": "05-30",
+      "time": "08:06:54",
+      "price": 4547,
+      "size": 35418,
+      "amount": 1504506.0,
+      "pool_type": "Dark"
+    }
+  ],
+  "gamma_exposure": [
+    {
+      "price": 4400,
+      "gex": -150000
+    },
+    {
+      "price": 4450,
+      "gex": -50000
+    },
+    {
+      "price": 4500,
+      "gex": 100000
+    },
+    {
+      "price": 4550,
+      "gex": 250000
+    },
+    {
+      "price": 4600,
+      "gex": 180000
+    }
+  ],
+  "meta": {
+    "last_update": "09:01:54",
+    "status": "active"
+  }
+}

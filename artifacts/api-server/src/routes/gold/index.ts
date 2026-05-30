@@ -16,6 +16,7 @@ import insiderRouter from "./insider.js";
 import alertsRouter from "./alerts.js";
 import quantRouter from "./quant.js";
 import factorFeaturesRouter from "./factor-features.js";
+import insiderBridgeRouter from "./insider-bridge.js";
 
 const router = Router();
 
@@ -36,5 +37,6 @@ router.use(insiderRouter);
 router.use(alertsRouter);
 router.use(quantRouter);
 router.use(factorFeaturesRouter);
+router.use(insiderBridgeRouter);
 
 export default router;

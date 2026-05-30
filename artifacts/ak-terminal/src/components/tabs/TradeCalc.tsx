@@ -1,893 +1,1173 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import {
-  useGetGoldPrice,
-  useGetGoldHistory,
-} from "@workspace/api-client-react";
+import { useEffect, useMemo, useCallback, useRef, useState } from "react";
+import { useGetGoldPrice, useGetGoldHistory } from "@workspace/api-client-react";
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
 // TYPES
-// ─────────────────────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
 
 type Mode      = "SCALP" | "INTRADAY" | "SWING";
-type Direction = "LONG"  | "SHORT";
-type CalcMode  = "AUTO"  | "MANUAL";
-type Regime    = "TRENDING" | "RANGING" | "VOLATILE" | "LOW_VOL";
-type Signal    = "LONG" | "SHORT" | "NO TRADE";
-type Tab       = "OVERVIEW" | "PEM" | "FPT" | "RISK";
+type Direction = "LONG" | "SHORT";
+type CalcMode  = "AUTO" | "MANUAL";
+type Regime    = "TRENDING" | "RANGING" | "VOLATILE" | "LOW_VOL" | "SQUEEZE" | "EXHAUSTION";
+type Tab       = "CALC" | "MONTECARLO" | "ZONES" | "RISK" | "EXPLANATION";
+type Phase     = "ABSORPTION" | "DISTRIBUTION" | "CONTINUATION" | "EXHAUSTION" | "SQUEEZE" | "UNKNOWN";
 
-interface Candle {
-  open?: number; o?: number;
-  high?: number; h?: number;
-  low?:  number; l?: number;
-  close?: number; c?: number;
-  volume?: number; vol?: number;
+interface BridgeData {
+  signal: string;
+  combined_score: number;
+  current_score: number;
+  option_flow_score: number;
+  dark_pool_score: number;
+  gamma_exposure: Array<{ strike: number; gex: number }>;
+  dark_pool: Array<{ price: number; size: number; side: string }>;
+  option_flow: Array<{ strike: number; type: string; premium: number; sentiment: string }>;
+  source: string;
+  meta?: { last_update: string; status: string; cycle?: number };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// CONFIG
-// ─────────────────────────────────────────────────────────────────────────────
+interface GARCHState { omega: number; alpha: number; beta: number; sigma2: number[] }
+interface KalmanState { mu: number; P: number; Q: number; R: number }
+interface OUParams   { theta: number; mu_ou: number; sigma_ou: number }
 
-const MODE_CFG = {
-  SCALP:    { atrSL: 1.0, atrTP: 1.8, bePct: 0.40, minRR: 1.2, label: "1–5 min"   },
-  INTRADAY: { atrSL: 1.8, atrTP: 3.2, bePct: 0.40, minRR: 1.8, label: "15–60 min" },
-  SWING:    { atrSL: 2.5, atrTP: 5.0, bePct: 0.45, minRR: 2.5, label: "4h–1d"     },
+interface MCResult {
+  pTP: number; pSL: number; pTP_paths: number[];
+  expectedShortfall: number; var95: number;
+  medianPath: number[]; percentile10: number[]; percentile90: number[];
+  converged: boolean; nPaths: number;
+}
+
+interface Zone {
+  price: number; label: string; pReaction: number;
+  type: "SUPPORT" | "RESISTANCE"; strength: number; source: string;
+}
+
+// ══════════════════════════════════════════════════════════════════
+// CONFIG
+// ══════════════════════════════════════════════════════════════════
+
+const MODE_CONFIG = {
+  SCALP:    { atrSL: 1.0, atrTP: 1.8, minRR: 1.2, minConf: 55, mcPaths: 800  },
+  INTRADAY: { atrSL: 1.8, atrTP: 3.2, minRR: 1.8, minConf: 50, mcPaths: 1000 },
+  SWING:    { atrSL: 2.5, atrTP: 5.0, minRR: 2.5, minConf: 45, mcPaths: 1200 },
 } as const;
 
-// PEM weights
-const PEM_W = {
-  ALPHA_MR: 0.40, ALPHA_MIC: 0.45, ALPHA_FAC: 0.15,
-  W_Z20: 0.30, W_Z60: 0.25, W_STOCH: 0.25, W_AM5: 0.10, W_AM15: 0.10,
-  W_OFI: 0.70, W_VWAP: 0.30,
-  W_CARRY: 0.35, W_YIELD: 0.40, W_RSI: 0.25,
-  K: 3.0,
-};
+const BRIDGE_URL     = "http://localhost:5001/data";
+const BRIDGE_TIMEOUT = 3000;
+const MC_STEPS       = 120; // pasos por path
 
-// ─────────────────────────────────────────────────────────────────────────────
-// MATH / INDICATORS
-// ─────────────────────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+// MATH UTILS
+// ══════════════════════════════════════════════════════════════════
 
-const clamp   = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(v, hi));
-const sigmoid = (z: number) => 1 / (1 + Math.exp(-z));
+const clamp   = (v: number, a: number, b: number) => Math.max(a, Math.min(v, b));
+const sigmoid = (x: number) => 1 / (1 + Math.exp(-x));
 
-function calcEMA(data: number[], period: number): number[] {
-  if (!data.length) return [];
-  const k = 2 / (period + 1);
-  const out = [data[0]];
-  for (let i = 1; i < data.length; i++) out.push(data[i] * k + out[i - 1] * (1 - k));
-  return out;
+// Box-Muller para normal estándar
+function randn(): number {
+  let u = 0, v = 0;
+  while (u === 0) u = Math.random();
+  while (v === 0) v = Math.random();
+  return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
 }
 
-function calcATR(candles: Candle[], period = 14): number {
-  if (candles.length < 2) return 1;
+// Student-t con ν grados de libertad (fat tails)
+function randStudentT(nu: number): number {
+  const z = randn();
+  const chi2 = Array.from({ length: nu }, () => randn() ** 2).reduce((a, b) => a + b, 0);
+  return z / Math.sqrt(chi2 / nu);
+}
+
+function EMA(data: number[], p: number): number[] {
+  if (data.length < p) return [];
+  const k = 2 / (p + 1);
+  const e = [data[0]];
+  for (let i = 1; i < data.length; i++) e[i] = data[i] * k + e[i - 1] * (1 - k);
+  return e;
+}
+
+function ATR(candles: any[], p = 14): number {
+  if (!candles?.length) return 10;
   const trs: number[] = [];
   for (let i = 1; i < candles.length; i++) {
-    const h  = candles[i].high   ?? candles[i].h  ?? 0;
-    const l  = candles[i].low    ?? candles[i].l  ?? 0;
-    const pc = candles[i - 1].close ?? candles[i - 1].c ?? 0;
+    const h  = candles[i].high   ?? candles[i].h;
+    const l  = candles[i].low    ?? candles[i].l;
+    const pc = candles[i-1].close ?? candles[i-1].c;
     trs.push(Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc)));
   }
-  const sl = trs.slice(-period);
-  return sl.reduce((a, b) => a + b, 0) / sl.length || 1;
+  if (trs.length < p) return 10;
+  return trs.slice(-p).reduce((a, b) => a + b, 0) / p;
 }
 
-function calcRSI(closes: number[], period = 14): number {
-  if (closes.length < period + 1) return 50;
-  const sl = closes.slice(-period - 1);
+function RSI(closes: number[], p = 14): number {
+  if (closes.length < p + 1) return 50;
   let g = 0, l = 0;
-  for (let i = 1; i < sl.length; i++) {
-    const d = sl[i] - sl[i - 1];
-    d >= 0 ? (g += d) : (l += Math.abs(d));
+  for (let i = closes.length - p; i < closes.length; i++) {
+    const d = closes[i] - closes[i - 1];
+    if (d >= 0) g += d; else l += Math.abs(d);
   }
   if (l === 0) return 100;
   return 100 - 100 / (1 + g / l);
 }
 
-function calcStoch(candles: Candle[], period = 14): number {
-  if (candles.length < period) return 0.5;
-  const sl = candles.slice(-period);
-  const h  = Math.max(...sl.map((c) => c.high ?? c.h ?? 0));
-  const l  = Math.min(...sl.map((c) => c.low  ?? c.l ?? 0));
-  const cl = candles.at(-1)?.close ?? candles.at(-1)?.c ?? 0;
-  return h === l ? 0.5 : (cl - l) / (h - l);
+function logReturns(closes: number[]): number[] {
+  const r: number[] = [];
+  for (let i = 1; i < closes.length; i++)
+    if (closes[i - 1] > 0) r.push(Math.log(closes[i] / closes[i - 1]));
+  return r;
 }
 
-function calcZScore(closes: number[], period: number): number {
-  if (closes.length < period) return 0;
-  const sl = closes.slice(-period);
-  const mu = sl.reduce((a, b) => a + b, 0) / period;
-  const sd = Math.sqrt(sl.map((x) => (x - mu) ** 2).reduce((a, b) => a + b, 0) / period);
-  return sd === 0 ? 0 : (closes.at(-1)! - mu) / sd;
+function zScore(closes: number[], p = 20): number {
+  if (closes.length < p) return 0;
+  const w = closes.slice(-p);
+  const m = w.reduce((a, b) => a + b, 0) / p;
+  const s = Math.sqrt(w.reduce((a, c) => a + (c - m) ** 2, 0) / p);
+  return s === 0 ? 0 : (closes[closes.length - 1] - m) / s;
 }
 
-function calcVWAPDev(candles: Candle[], period = 20): number {
-  if (candles.length < period) return 0;
-  const sl = candles.slice(-period);
-  let cv = 0, ct = 0;
-  for (const c of sl) {
-    const h = c.high ?? c.h ?? 0, lo = c.low ?? c.l ?? 0, cl = c.close ?? c.c ?? 0;
-    const v = c.volume ?? c.vol ?? 1;
-    cv += v; ct += ((h + lo + cl) / 3) * v;
+// ══════════════════════════════════════════════════════════════════
+// GARCH(1,1)
+// σ²_t = ω + α·ε²_{t-1} + β·σ²_{t-1}
+// Parámetros típicos para commodities / oro
+// ══════════════════════════════════════════════════════════════════
+function fitGARCH(returns: number[]): GARCHState {
+  if (returns.length < 20) {
+    const s2 = returns.reduce((a, r) => a + r * r, 0) / Math.max(returns.length, 1);
+    return { omega: s2 * 0.05, alpha: 0.10, beta: 0.85, sigma2: [s2] };
   }
-  const vwap = cv > 0 ? ct / cv : 0;
-  const cl_  = candles.at(-1)?.close ?? candles.at(-1)?.c ?? vwap;
-  const vals  = sl.map((c) => c.close ?? c.c ?? 0);
-  const mu   = vals.reduce((a, b) => a + b, 0) / vals.length;
-  const sd   = Math.sqrt(vals.map((x) => (x - mu) ** 2).reduce((a, b) => a + b, 0) / vals.length);
-  return sd === 0 ? 0 : clamp((cl_ - vwap) / sd, -3, 3) / 3;
-}
-
-function calcOFI(candles: Candle[], period = 10): number {
-  if (candles.length < period) return 0;
-  const sl = candles.slice(-period);
-  let buy = 0, sell = 0;
-  for (const c of sl) {
-    const o = c.open ?? c.o ?? 0, cl = c.close ?? c.c ?? 0, v = c.volume ?? c.vol ?? 1;
-    cl >= o ? (buy += v) : (sell += v);
+  // Parámetros fijos calibrados para oro (GARCH(1,1) estándar)
+  const omega = 2e-7;
+  const alpha = 0.08;
+  const beta  = 0.90;
+  const sigma2: number[] = [];
+  let s2 = returns.slice(0, 10).reduce((a, r) => a + r * r, 0) / 10;
+  sigma2.push(s2);
+  for (let i = 1; i < returns.length; i++) {
+    s2 = omega + alpha * returns[i - 1] ** 2 + beta * s2;
+    sigma2.push(Math.max(s2, 1e-10));
   }
-  const t = buy + sell;
-  return t === 0 ? 0 : clamp((buy - sell) / t, -1, 1);
+  return { omega, alpha, beta, sigma2 };
 }
 
-function calcCarry(closes: number[], ATR: number): number {
-  if (closes.length < 50 || ATR === 0) return 0;
-  const e20 = calcEMA(closes, 20).at(-1)!;
-  const e50 = calcEMA(closes, 50).at(-1)!;
-  return clamp((e20 - e50) / ATR, -3, 3) / 3;
+function garchNextSigma2(g: GARCHState, lastReturn: number): number {
+  const lastSig2 = g.sigma2.at(-1) ?? 1e-4;
+  return Math.max(g.omega + g.alpha * lastReturn ** 2 + g.beta * lastSig2, 1e-10);
 }
 
-function calcYield(closes: number[], ATR: number): number {
-  if (closes.length < 6 || ATR === 0) return 0;
-  return clamp((closes.at(-1)! - closes.at(-6)!) / ATR, -3, 3) / 3;
-}
+// ══════════════════════════════════════════════════════════════════
+// KALMAN FILTER — estimación dinámica de μ
+// Estado: [drift μ_t]
+// Modelo: μ_t = μ_{t-1} + ruido_proceso
+//         r_t = μ_t·dt + σ_t·ε
+// ══════════════════════════════════════════════════════════════════
+function kalmanFilter(returns: number[], sigmas: number[]): KalmanState {
+  const Q = 1e-6;   // ruido proceso (drift cambia lentamente)
+  const R = 1e-4;   // ruido observación
+  let mu = returns.slice(0, 5).reduce((a, b) => a + b, 0) / 5;
+  let P  = 1e-4;
 
-function calcAnomaly(closes: number[], period: number, ATR: number): number {
-  if (closes.length < period || ATR === 0) return 0;
-  const e = calcEMA(closes, period).at(-1)!;
-  return clamp((closes.at(-1)! - e) / ATR, -3, 3) / 3;
-}
-
-function calcOUTheta(closes: number[], period = 20): number {
-  if (closes.length < period) return 0;
-  const sl = closes.slice(-period);
-  const mu = sl.reduce((a, b) => a + b, 0) / period;
-  const d  = sl.map((x) => x - mu);
-  let cov = 0, varx = 0;
-  for (let i = 0; i < d.length - 1; i++) {
-    cov  += d[i] * d[i + 1];
-    varx += d[i] ** 2;
+  for (let i = 0; i < returns.length; i++) {
+    // Predict
+    const P_pred = P + Q;
+    // Update
+    const sigma_obs = sigmas[i] ?? Math.sqrt(R);
+    const R_t = sigma_obs ** 2 + R;
+    const K   = P_pred / (P_pred + R_t);
+    mu = mu + K * (returns[i] - mu);
+    P  = (1 - K) * P_pred;
   }
-  if (varx === 0) return 0;
-  return clamp(-Math.log(Math.abs(cov / varx)), 0, 5);
+  return { mu, P, Q, R };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// PEM — Probabilistic Edge Model (from HTML formulas)
-// ─────────────────────────────────────────────────────────────────────────────
-
-interface PEMOut {
-  sMR: number; sMIC: number; sFAC: number;
-  cas: number; pLong: number; pShort: number; signal: Signal;
+// ══════════════════════════════════════════════════════════════════
+// ORNSTEIN-UHLENBECK — detección mean reversion
+// dS = θ(μ_ou - S)dt + σ_ou·dW
+// θ > 1.5 → mean reverting fuerte
+// θ < 0.3 → trending / random walk
+// ══════════════════════════════════════════════════════════════════
+function estimateOU(closes: number[]): OUParams {
+  if (closes.length < 20) return { theta: 0.5, mu_ou: closes.at(-1) ?? 0, sigma_ou: 10 };
+  const n    = closes.length;
+  const mean = closes.reduce((a, b) => a + b, 0) / n;
+  // OLS para estimar θ: S_t - S_{t-1} = θ(μ - S_{t-1})·dt + ε
+  let sumXX = 0, sumXY = 0;
+  for (let i = 1; i < n; i++) {
+    const x = closes[i - 1] - mean;
+    const y = closes[i] - closes[i - 1];
+    sumXX += x * x;
+    sumXY += x * y;
+  }
+  const theta = sumXX > 0 ? clamp(-sumXY / sumXX, 0, 10) : 0.5;
+  const residuals: number[] = [];
+  for (let i = 1; i < n; i++)
+    residuals.push(closes[i] - closes[i-1] - theta * (mean - closes[i-1]));
+  const sigma_ou = Math.sqrt(residuals.reduce((a, r) => a + r*r, 0) / residuals.length);
+  return { theta, mu_ou: mean, sigma_ou: Math.max(sigma_ou, 0.01) };
 }
 
-function computePEM(
-  z20: number, z60: number, sto: number, am5: number, am15: number,
-  OFI: number, vwap: number, carry: number, yld: number, RSI: number
-): PEMOut {
-  const rn   = RSI / 100;
-  const sMR  = PEM_W.W_Z20 * (-z20) + PEM_W.W_Z60 * (-z60) + PEM_W.W_STOCH * (0.5 - sto)
-             + PEM_W.W_AM5 * (-am5) + PEM_W.W_AM15 * (-am15);
-  const sMIC = PEM_W.W_OFI * OFI + PEM_W.W_VWAP * vwap;
-  const sFAC = PEM_W.W_CARRY * (-carry) + PEM_W.W_YIELD * (-yld) + PEM_W.W_RSI * (rn - 0.5);
-  const cas  = PEM_W.ALPHA_MR * sMR + PEM_W.ALPHA_MIC * sMIC + PEM_W.ALPHA_FAC * sFAC;
-  const pL   = sigmoid(PEM_W.K * cas);
+// ══════════════════════════════════════════════════════════════════
+// MONTE CARLO ENGINE
+// Combina GARCH + Kalman + OU + Student-t (fat tails, ν=5)
+// ══════════════════════════════════════════════════════════════════
+function runMonteCarlo(
+  entry: number, sl: number, tp: number,
+  garch: GARCHState, kalman: KalmanState, ou: OUParams,
+  muBridge: number,   // señal del bridge si está disponible
+  hasBridge: boolean,
+  nPaths: number,
+  regime: Regime
+): MCResult {
+  const nu = 5; // grados de libertad Student-t (fat tails realistas)
+  const dt = 1 / MC_STEPS;
+
+  // μ final: mezcla Kalman + bridge + OU
+  const mu_kalman = kalman.mu;
+  const mu_ou_pull = ou.theta * (ou.mu_ou - entry) * dt;
+  let mu_final = mu_kalman * 0.6 + mu_ou_pull * 0.3 + (hasBridge ? muBridge * 0.1 : 0);
+
+  // Ajuste por régimen
+  const regime_vol_mult =
+    regime === "VOLATILE"  ? 1.40 :
+    regime === "SQUEEZE"   ? 1.55 :
+    regime === "LOW_VOL"   ? 0.65 :
+    regime === "RANGING"   ? 0.85 : 1.0;
+
+  let lastSig2 = garch.sigma2.at(-1) ?? 1e-4;
+  let lastRet  = 0;
+
+  let hitTP = 0, hitSL = 0;
+  const pTP_sample: number[] = [];
+  const finalPrices: number[] = [];
+  const allMedianPrices: number[][] = [];
+
+  for (let p = 0; p < nPaths; p++) {
+    let S    = entry;
+    let sig2 = lastSig2;
+    let ret  = lastRet;
+    let done = false;
+    const path: number[] = [S];
+
+    for (let t = 0; t < MC_STEPS; t++) {
+      // GARCH update
+      sig2 = Math.max(garch.omega + garch.alpha * ret ** 2 + garch.beta * sig2, 1e-10);
+      const sigma_t = Math.sqrt(sig2) * regime_vol_mult * S;
+
+      // OU mean reversion component
+      const ou_drift = ou.theta * (ou.mu_ou - S) * dt;
+
+      // Drift total
+      const drift = (mu_final + ou_drift / S) * S * dt;
+
+      // Shock con fat tails (Student-t ν=5)
+      const shock = sigma_t * randStudentT(nu) * Math.sqrt(dt);
+      ret = (drift + shock) / Math.max(S, 1);
+      S   = S + drift + shock;
+
+      path.push(S);
+
+      if (S >= tp) { hitTP++; pTP_sample.push(1); done = true; break; }
+      if (S <= sl) { hitSL++; pTP_sample.push(0); done = true; break; }
+    }
+
+    if (!done) {
+      pTP_sample.push(S > entry ? 1 : 0);
+      if (S >= tp) hitTP++; else hitSL++;
+    }
+
+    finalPrices.push(S);
+    if (p < 200) allMedianPrices.push(path); // guardar primeros 200 paths para visualización
+  }
+
+  // Percentiles para visualización
+  const stepsData: { p10: number; p50: number; p90: number }[] = [];
+  for (let t = 0; t <= MC_STEPS; t++) {
+    const vals = allMedianPrices.map(path => path[Math.min(t, path.length - 1)]).sort((a, b) => a - b);
+    const n = vals.length;
+    stepsData.push({
+      p10: vals[Math.floor(n * 0.10)] ?? entry,
+      p50: vals[Math.floor(n * 0.50)] ?? entry,
+      p90: vals[Math.floor(n * 0.90)] ?? entry,
+    });
+  }
+
+  // Expected Shortfall (CVaR) — pérdida promedio en el peor 5% de casos
+  const sortedLosses = finalPrices
+    .filter(p => p < entry)
+    .map(p => entry - p)
+    .sort((a, b) => b - a);
+  const es_n = Math.max(Math.floor(sortedLosses.length * 0.05), 1);
+  const expectedShortfall = sortedLosses.slice(0, es_n).reduce((a, b) => a + b, 0) / es_n;
+
+  // VaR 95%
+  const sortedPnL = finalPrices.map(p => p - entry).sort((a, b) => a - b);
+  const var95 = Math.abs(sortedPnL[Math.floor(sortedPnL.length * 0.05)] ?? 0);
+
+  const total = hitTP + hitSL;
+  const pTP_mc = total > 0 ? hitTP / total : 0.5;
+
   return {
-    sMR, sMIC, sFAC, cas, pLong: pL, pShort: 1 - pL,
-    signal: pL > 0.65 ? "LONG" : pL < 0.35 ? "SHORT" : "NO TRADE",
+    pTP:              clamp(pTP_mc, 0.05, 0.95),
+    pSL:              clamp(1 - pTP_mc, 0.05, 0.95),
+    pTP_paths:        pTP_sample,
+    expectedShortfall,
+    var95,
+    medianPath:       stepsData.map(s => s.p50),
+    percentile10:     stepsData.map(s => s.p10),
+    percentile90:     stepsData.map(s => s.p90),
+    converged:        nPaths >= 500,
+    nPaths,
   };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// FIRST PASSAGE TIME (two-barrier GBM, Harrison 1985)
-// ─────────────────────────────────────────────────────────────────────────────
-
-interface FPTOut {
-  pTP: number; pSL: number; pBE: number;
-  ev: number; rr: number; minWR: number; kelly: number;
-}
-
-function computeFPT(tpDist: number, slDist: number, beDist: number,
-  mu: number, sigma: number, sign: 1 | -1): FPTOut {
-  const a  = Math.abs(tpDist);
-  const b  = Math.abs(slDist);
-  const be = Math.abs(beDist);
-  const muA = sign * (mu - sigma * sigma / 2);
-  const theta = sigma * sigma > 0 ? 2 * muA / (sigma * sigma) : 0;
-
-  let pTP: number, pSL: number, pBE: number;
-
-  if (Math.abs(theta) < 0.001 || !isFinite(theta) || a + b === 0) {
-    pTP = b > 0 ? b / (a + b) : 0.5;
-    pSL = a > 0 ? a / (a + b) : 0.5;
-    pBE = be > 0 && be < a ? b / (be + b) : be >= a ? pTP : 0;
-  } else {
-    const ea = Math.exp(theta * a);
-    const eb = Math.exp(-theta * b);
-    const D  = ea - eb;
-    pTP = D !== 0 ? (1 - eb) / D : 0.5;
-    pSL = D !== 0 ? (ea - 1) / D : 0.5;
-    if (be > 0 && be < a) {
-      const ebe = Math.exp(theta * be);
-      const Db  = ebe - eb;
-      pBE = Db !== 0 ? (1 - eb) / Db : 0.5;
-    } else {
-      pBE = be >= a ? pTP : 0;
-    }
+// ══════════════════════════════════════════════════════════════════
+// μ_ADJ desde bridge o técnicos
+// ══════════════════════════════════════════════════════════════════
+function calcMuBridge(
+  dir: Direction, bridge: BridgeData | null,
+  rsi: number, zSc: number, momentum: number, trendStr: number, bullish: boolean
+): { mu: number; hasBridge: boolean } {
+  if (bridge) {
+    const raw =
+      0.50 * clamp(bridge.combined_score,    -1, 1) +
+      0.30 * clamp(bridge.option_flow_score, -1, 1) +
+      0.20 * clamp(bridge.dark_pool_score,   -1, 1);
+    return { mu: raw * (dir === "LONG" ? 1 : -1) * 0.0001, hasBridge: true };
   }
-
-  pTP = clamp(pTP, 0, 1);
-  pSL = clamp(pSL, 0, 1);
-  pBE = clamp(pBE, 0, 1);
-
-  const rr    = b > 0 ? a / b : 0;
-  const ev    = pTP * a - pSL * b;
-  const minWR = a + b > 0 ? b / (a + b) : 0;
-  const kelly = rr > 0 ? pTP - pSL / rr : 0;
-  return { pTP, pSL, pBE, ev, rr, minWR, kelly };
+  // Fallback técnico — unidades de retorno por período
+  let score = 0;
+  score += bullish ? 0.15 : -0.15;
+  score += clamp(trendStr * 0.08, -0.15, 0.15);
+  score += clamp(momentum * 0.03, -0.10, 0.10);
+  if (rsi < 35) score += 0.10; else if (rsi > 65) score -= 0.10;
+  if (zSc < -1.5) score += 0.08; if (zSc > 1.5) score -= 0.08;
+  const mu = clamp(score, -0.5, 0.5) * (dir === "LONG" ? 1 : -1) * 0.0001;
+  return { mu, hasBridge: false };
 }
 
-const kellyFrac = (p: number, rr: number, f = 0.25) =>
-  Math.max(0, (p - (1 - p) / Math.max(rr, 0.001)) * f);
+// ══════════════════════════════════════════════════════════════════
+// KELLY CRITERION
+// f* = (p·b - q) / b   donde b = R:R, p = P(TP), q = P(SL)
+// ══════════════════════════════════════════════════════════════════
+function kelly(pTP: number, rr: number): number {
+  const q = 1 - pTP;
+  const f = (pTP * rr - q) / rr;
+  return clamp(f, 0, 0.25); // máx 25% del capital (half-kelly en práctica)
+}
 
-// ─────────────────────────────────────────────────────────────────────────────
-// THEME
-// ─────────────────────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+// BRIER SCORE (calibración de probabilidades)
+// Mide qué tan calibradas son las predicciones históricas
+// ══════════════════════════════════════════════════════════════════
+function brierScore(predictions: number[], outcomes: number[]): number {
+  if (!predictions.length) return 0;
+  const n = Math.min(predictions.length, outcomes.length);
+  return predictions.slice(0, n).reduce((s, p, i) => s + (p - outcomes[i]) ** 2, 0) / n;
+}
 
-const C = {
-  bg0: "#050608", bg1: "#080b10", bg2: "#0d1118", bg3: "#111620",
-  border: "#18202e", border2: "#1e2a3c",
-  accent: "#00d4ff", green: "#00e87a", red: "#ff2d55",
-  yellow: "#ffc020", purple: "#9b70ff", teal: "#00ccaa",
-  muted: "#2d3d52", dim: "#111820",
-  text: "#b8cce0", sub: "#4a6080", label: "#364a62",
-} as const;
+// ══════════════════════════════════════════════════════════════════
+// ZONES
+// ══════════════════════════════════════════════════════════════════
+function calcZones(
+  price: number, atr: number, ema20: number, ema50: number,
+  sigma_daily: number,
+  gexLevels: Array<{ strike: number; gex: number }>,
+  dpLevels:  Array<{ price: number; size: number }>
+): Zone[] {
+  const zones: Zone[] = [];
+  const addEMA = (val: number, label: string, str: number) => {
+    const dist = Math.abs(price - val);
+    if (dist / atr > 5) return;
+    const decay = Math.exp(-dist / (sigma_daily * price + atr));
+    zones.push({
+      price: val, label, source: "TECHNICAL",
+      pReaction: clamp(decay * str * 0.8 + 0.10, 0.15, 0.88),
+      type: price > val ? "SUPPORT" : "RESISTANCE", strength: str,
+    });
+  };
+  addEMA(ema20, "EMA 20", 0.60);
+  addEMA(ema50, "EMA 50", 0.75);
 
-const MONO = "'IBM Plex Mono','Fira Code',monospace";
+  gexLevels.slice(0, 5).forEach(g => {
+    const dist = Math.abs(price - g.strike);
+    if (dist / atr > 8) return;
+    const n = clamp(Math.abs(g.gex) / 300000, 0, 1);
+    zones.push({
+      price: g.strike,
+      label: `GEX ${g.gex > 0 ? "+" : ""}${(g.gex / 1000).toFixed(0)}k`,
+      source: "GEX",
+      pReaction: clamp(n * 0.6 + Math.exp(-dist / (atr * 3)) * 0.4, 0.10, 0.92),
+      type: g.strike > price ? "RESISTANCE" : "SUPPORT",
+      strength: n,
+    });
+  });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// SUB-COMPONENTS
-// ─────────────────────────────────────────────────────────────────────────────
+  dpLevels.slice(0, 5).forEach(d => {
+    const dist = Math.abs(price - d.price);
+    if (dist / atr > 6) return;
+    const n = clamp(d.size / 500000, 0, 1);
+    zones.push({
+      price: d.price, label: `DP ${(d.size / 1000).toFixed(0)}k`, source: "DARK_POOL",
+      pReaction: clamp(n * 0.5 + Math.exp(-dist / (atr * 2)) * 0.5, 0.10, 0.90),
+      type: d.price < price ? "SUPPORT" : "RESISTANCE",
+      strength: n,
+    });
+  });
 
-const PHead = ({ left, right }: { left: string; right?: string }) => (
-  <div style={{
-    background: C.bg2, borderBottom: `1px solid ${C.border}`,
-    padding: "4px 10px", fontSize: 9, color: C.sub, letterSpacing: "0.12em",
-    display: "flex", justifyContent: "space-between",
-  }}>
-    <span>{left}</span>
-    {right && <span style={{ color: C.label }}>{right}</span>}
-  </div>
-);
+  return zones.sort((a, b) => b.pReaction - a.pReaction).slice(0, 8);
+}
 
-const Row = ({ label, val, vc }: { label: string; val: string; vc?: string }) => (
-  <div style={{
-    display: "flex", justifyContent: "space-between", alignItems: "center",
-    padding: "4px 10px", borderBottom: `1px solid ${C.dim}`,
-  }}>
-    <span style={{ fontSize: 9, color: C.sub, letterSpacing: "0.08em" }}>{label}</span>
-    <span style={{ fontSize: 11, fontWeight: 500, color: vc ?? C.text }}>{val}</span>
-  </div>
-);
+// ══════════════════════════════════════════════════════════════════
+// PHASE DETECTION
+// ══════════════════════════════════════════════════════════════════
+function detectPhase(
+  rsi: number, zSc: number, volExp: number, trendStr: number, ou: OUParams, price: number
+): Phase {
+  if (zSc < -1.5 && rsi < 40)                       return "ABSORPTION";
+  if (zSc >  1.5 && rsi > 65)                       return "DISTRIBUTION";
+  if ((rsi > 78 || rsi < 22) && volExp > 1.5)       return "EXHAUSTION";
+  if (volExp < 0.6 && Math.abs(zSc) < 0.5)          return "SQUEEZE";
+  if (ou.theta > 1.5 && Math.abs(price - ou.mu_ou) / ou.sigma_ou < 1)
+                                                     return "ABSORPTION"; // OU mean reversion
+  if (trendStr > 1.2)                                return "CONTINUATION";
+  return "UNKNOWN";
+}
 
-const Cell = ({
-  label, val, vc, sub, span = 1,
-}: { label: string; val: string; vc?: string; sub?: string; span?: number }) => (
-  <div style={{
-    background: C.bg2, padding: "8px 10px",
-    borderRight: `1px solid ${C.dim}`, borderBottom: `1px solid ${C.dim}`,
-    gridColumn: span > 1 ? `span ${span}` : undefined,
-  }}>
-    <div style={{ fontSize: 9, color: C.sub, letterSpacing: "0.1em", marginBottom: 3 }}>{label}</div>
-    <div style={{ fontSize: 13, fontWeight: 500, color: vc ?? C.text }}>{val}</div>
-    {sub && <div style={{ fontSize: 9, color: C.label, marginTop: 2 }}>{sub}</div>}
-  </div>
-);
+// ══════════════════════════════════════════════════════════════════
+// BRIDGE HOOK
+// ══════════════════════════════════════════════════════════════════
+function useBridge() {
+  const [data,   setData]   = useState<BridgeData | null>(null);
+  const [status, setStatus] = useState<"CONNECTING" | "LIVE" | "OFFLINE">("CONNECTING");
+  const fetch_ = useCallback(async () => {
+    try {
+      const ctrl = new AbortController();
+      const t    = setTimeout(() => ctrl.abort(), BRIDGE_TIMEOUT);
+      const res  = await fetch(BRIDGE_URL, { signal: ctrl.signal });
+      clearTimeout(t);
+      if (!res.ok) throw new Error();
+      setData(await res.json());
+      setStatus("LIVE");
+    } catch { setStatus("OFFLINE"); }
+  }, []);
+  useEffect(() => { fetch_(); const id = setInterval(fetch_, 15000); return () => clearInterval(id); }, [fetch_]);
+  return { data, status, refetch: fetch_ };
+}
 
-const Btn = ({
-  label, active, onClick, ac,
-}: { label: string; active: boolean; onClick: () => void; ac?: string }) => (
-  <button onClick={onClick} style={{
-    fontFamily: MONO, fontSize: 10, letterSpacing: "0.1em",
-    padding: "5px 0", cursor: "pointer", width: "100%",
-    background: active ? (ac ?? C.accent) + "18" : "transparent",
-    color: active ? (ac ?? C.accent) : C.sub,
-    border: `1px solid ${active ? (ac ?? C.accent) + "66" : C.border}`,
-    borderRadius: 2, outline: "none",
-    transition: "all 0.1s",
-  }}>
-    {label}
-  </button>
-);
+// ══════════════════════════════════════════════════════════════════
+// SPARKLINE COMPONENT
+// ══════════════════════════════════════════════════════════════════
+function Sparkline({ data, width = 200, height = 50, color = "#4ade80" }: {
+  data: number[]; width?: number; height?: number; color?: string;
+}) {
+  if (!data.length) return null;
+  const min = Math.min(...data), max = Math.max(...data);
+  const range = max - min || 1;
+  const pts = data.map((v, i) => {
+    const x = (i / (data.length - 1)) * width;
+    const y = height - ((v - min) / range) * height;
+    return `${x},${y}`;
+  }).join(" ");
+  return (
+    <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} style={{ overflow: "visible" }}>
+      <polyline points={pts} fill="none" stroke={color} strokeWidth="1.5" strokeLinejoin="round" />
+    </svg>
+  );
+}
 
-// ─────────────────────────────────────────────────────────────────────────────
-// MAIN
-// ─────────────────────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+// MC PATH VISUALIZER
+// ══════════════════════════════════════════════════════════════════
+function MCPathViz({
+  median, p10, p90, sl, tp, entry, width = 340, height = 160,
+}: {
+  median: number[]; p10: number[]; p90: number[];
+  sl: number; tp: number; entry: number;
+  width?: number; height?: number;
+}) {
+  if (!median.length) return null;
+  const allVals = [...median, ...p10, ...p90, sl, tp, entry];
+  const min = Math.min(...allVals) * 0.9995;
+  const max = Math.max(...allVals) * 1.0005;
+  const range = max - min || 1;
+  const n = median.length;
 
+  const toSVG = (v: number, i: number) => ({
+    x: (i / (n - 1)) * width,
+    y: height - ((v - min) / range) * height,
+  });
+
+  const pathStr = (arr: number[]) =>
+    arr.map((v, i) => { const { x, y } = toSVG(v, i); return `${i === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`; }).join(" ");
+
+  const bandPts = [
+    ...p10.map((v, i) => toSVG(v, i)),
+    ...[...p90].reverse().map((v, i) => toSVG(v, n - 1 - i)),
+  ];
+  const bandStr = bandPts.map((pt, i) => `${i === 0 ? "M" : "L"}${pt.x.toFixed(1)},${pt.y.toFixed(1)}`).join(" ") + "Z";
+
+  const tpY  = height - ((tp - min) / range) * height;
+  const slY  = height - ((sl - min) / range) * height;
+  const entY = height - ((entry - min) / range) * height;
+
+  return (
+    <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} className="w-full">
+      {/* Band P10-P90 */}
+      <path d={bandStr} fill="rgba(74,222,128,0.06)" />
+      {/* TP line */}
+      <line x1={0} y1={tpY} x2={width} y2={tpY} stroke="#4ade80" strokeWidth="1" strokeDasharray="4,3" opacity="0.6" />
+      <text x={width - 4} y={tpY - 3} fill="#4ade80" fontSize="9" textAnchor="end" opacity="0.8">TP</text>
+      {/* SL line */}
+      <line x1={0} y1={slY} x2={width} y2={slY} stroke="#f87171" strokeWidth="1" strokeDasharray="4,3" opacity="0.6" />
+      <text x={width - 4} y={slY + 10} fill="#f87171" fontSize="9" textAnchor="end" opacity="0.8">SL</text>
+      {/* Entry line */}
+      <line x1={0} y1={entY} x2={width} y2={entY} stroke="#94a3b8" strokeWidth="0.8" opacity="0.4" />
+      {/* P10 */}
+      <path d={pathStr(p10)} fill="none" stroke="rgba(74,222,128,0.25)" strokeWidth="1" />
+      {/* P90 */}
+      <path d={pathStr(p90)} fill="none" stroke="rgba(74,222,128,0.25)" strokeWidth="1" />
+      {/* Median */}
+      <path d={pathStr(median)} fill="none" stroke="#4ade80" strokeWidth="2" />
+    </svg>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════
+// MAIN COMPONENT
+// ══════════════════════════════════════════════════════════════════
 export function TradeCalc() {
-
-  // API
   const { data: priceData }   = useGetGoldPrice();
   const { data: historyData } = useGetGoldHistory({ interval: "15m", period: "7d" });
+  const { data: bridge, status: bridgeStatus, refetch } = useBridge();
 
-  const livePrice: number  = priceData?.price ?? 4500;
-  const candles: Candle[]  = historyData?.candles ?? [];
-  const closes = useMemo(() => candles.map((c) => c.close ?? c.c ?? 0), [candles]);
+  const livePrice = priceData?.price ?? 4500;
+  const candles   = historyData?.candles ?? [];
+  const closes    = useMemo(() => candles.map((c: any) => c.close ?? c.c), [candles]);
+  const returns_  = useMemo(() => logReturns(closes), [closes]);
 
-  // State
-  const [mode,     setMode]     = useState<Mode>("INTRADAY");
-  const [calcMode, setCalcMode] = useState<CalcMode>("AUTO");
-  const [dir,      setDir]      = useState<Direction>("LONG");
-  const [capital,  setCapital]  = useState(10000);
-  const [riskPct,  setRiskPct]  = useState(1);
-  const [entry,    setEntry]    = useState(livePrice);
-  const [sl,       setSL]       = useState(livePrice - 20);
-  const [tp,       setTP]       = useState(livePrice + 36);
-  const [be,       setBE]       = useState(livePrice + 14);
-  const [tab,      setTab]      = useState<Tab>("OVERVIEW");
+  const [tab,       setTab]       = useState<Tab>("CALC");
+  const [mode,      setMode]      = useState<Mode>("INTRADAY");
+  const [calcMode,  setCalcMode]  = useState<CalcMode>("MANUAL");
+  const [direction, setDirection] = useState<Direction>("LONG");
+  const [capital,   setCapital]   = useState(1000);
+  const [entry,     setEntry]     = useState(livePrice);
+  const [sl,        setSL]        = useState(livePrice - 15);
+  const [tp,        setTP]        = useState(livePrice + 30);
+  const [mcResult,  setMcResult]  = useState<MCResult | null>(null);
+  const [mcRunning, setMcRunning] = useState(false);
+  const cfg = MODE_CONFIG[mode];
 
-  const cfg = MODE_CFG[mode];
+  // ── Indicators ──────────────────────────────────────────────────
+  const ema20 = useMemo(() => EMA(closes, 20), [closes]);
+  const ema50 = useMemo(() => EMA(closes, 50), [closes]);
+  const atr14 = useMemo(() => ATR(candles, 14), [candles]);
+  const atr50 = useMemo(() => ATR(candles, 50), [candles]);
+  const rsi14 = useMemo(() => RSI(closes, 14), [closes]);
+  const zSc   = useMemo(() => zScore(closes, 20), [closes]);
 
-  // Indicators
-  const ATR14 = useMemo(() => calcATR(candles, 14),    [candles]);
-  const ATR50 = useMemo(() => calcATR(candles, 50),    [candles]);
-  const RSI14 = useMemo(() => calcRSI(closes, 14),     [closes]);
-  const STOCH = useMemo(() => calcStoch(candles, 14),  [candles]);
-  const Z20   = useMemo(() => calcZScore(closes, 20),  [closes]);
-  const Z60   = useMemo(() => calcZScore(closes, 60),  [closes]);
-  const VWAPD = useMemo(() => calcVWAPDev(candles, 20),[candles]);
-  const OFI   = useMemo(() => calcOFI(candles, 10),   [candles]);
-  const CARRY = useMemo(() => calcCarry(closes, ATR14),[closes, ATR14]);
-  const YIELD = useMemo(() => calcYield(closes, ATR14),[closes, ATR14]);
-  const AM5   = useMemo(() => calcAnomaly(closes, 5,  ATR14), [closes, ATR14]);
-  const AM15  = useMemo(() => calcAnomaly(closes, 15, ATR14), [closes, ATR14]);
-  const THETA = useMemo(() => calcOUTheta(closes, 20), [closes]);
+  const lastEMA20 = ema20.at(-1) ?? livePrice;
+  const lastEMA50 = ema50.at(-1) ?? livePrice;
+  const bullish   = lastEMA20 > lastEMA50;
+  const trendStr  = Math.abs(lastEMA20 - lastEMA50) / atr14;
+  const volExp    = atr50 > 0 ? atr14 / atr50 : 1;
+  const momentum  = closes.length > 10 ? (closes.at(-1)! - closes.at(-10)!) / atr14 : 0;
 
-  const EMA20L = useMemo(() => calcEMA(closes, 20).at(-1) ?? livePrice, [closes, livePrice]);
-  const EMA50L = useMemo(() => calcEMA(closes, 50).at(-1) ?? livePrice, [closes, livePrice]);
-  const volExp   = ATR50 > 0 ? ATR14 / ATR50 : 1;
-  const trendStr = ATR14 > 0 ? Math.abs(EMA20L - EMA50L) / ATR14 : 0;
-  const bull     = EMA20L > EMA50L;
+  // ── Quant models ────────────────────────────────────────────────
+  const garch  = useMemo(() => fitGARCH(returns_), [returns_]);
+  const kalman = useMemo(() => kalmanFilter(returns_, garch.sigma2.map(Math.sqrt)), [returns_, garch]);
+  const ou     = useMemo(() => estimateOU(closes.slice(-60)), [closes]);
 
-  const regime: Regime =
-    volExp > 1.8       ? "VOLATILE" :
-    ATR14 < ATR50*0.75 ? "LOW_VOL"  :
-    trendStr < 0.3     ? "RANGING"  : "TRENDING";
+  // ── Regime ──────────────────────────────────────────────────────
+  const regime: Regime = (() => {
+    if (volExp > 2.0)                          return "VOLATILE";
+    if (volExp < 0.55 && Math.abs(zSc) < 0.4) return "SQUEEZE";
+    if (atr14 < atr50 * 0.72)                 return "LOW_VOL";
+    if (trendStr < 0.25)                       return "RANGING";
+    if (rsi14 > 80 || rsi14 < 20)             return "EXHAUSTION";
+    return "TRENDING";
+  })();
 
-  // Auto levels
+  // ── AUTO mode ───────────────────────────────────────────────────
   useEffect(() => {
     if (calcMode !== "AUTO") return;
-    const sign = dir === "LONG" ? 1 : -1;
-    const slD  = +(ATR14 * cfg.atrSL).toFixed(2);
-    const tpD  = +(ATR14 * cfg.atrTP).toFixed(2);
-    const beD  = +(tpD * cfg.bePct).toFixed(2);
-    setEntry(+livePrice.toFixed(2));
-    setSL(  +(livePrice - sign * slD).toFixed(2));
-    setTP(  +(livePrice + sign * tpD).toFixed(2));
-    setBE(  +(livePrice + sign * beD).toFixed(2));
-  }, [calcMode, ATR14, dir, cfg, livePrice]);
+    const ae = livePrice;
+    setEntry(ae);
+    setSL(direction === "LONG" ? ae - atr14 * cfg.atrSL : ae + atr14 * cfg.atrSL);
+    setTP(direction === "LONG" ? ae + atr14 * cfg.atrTP : ae - atr14 * cfg.atrTP);
+  }, [calcMode, atr14, direction, cfg, livePrice]);
 
-  // Distances
-  const slD = +Math.abs(entry - sl).toFixed(2);
-  const tpD = +Math.abs(tp - entry).toFixed(2);
-  const beD = +Math.abs(be - entry).toFixed(2);
-  const beValid = dir === "LONG"
-    ? be > entry && be < tp
-    : be < entry && be > tp;
+  // ── Core math ───────────────────────────────────────────────────
+  const slDist = Math.abs(entry - sl);
+  const tpDist = Math.abs(tp - entry);
+  const rr     = slDist > 0 ? tpDist / slDist : 0;
+  const counter = (direction === "LONG" && !bullish) || (direction === "SHORT" && bullish);
 
-  // PEM
-  const pem = useMemo(() => computePEM(Z20, Z60, STOCH, AM5, AM15, OFI, VWAPD, CARRY, YIELD, RSI14),
-    [Z20, Z60, STOCH, AM5, AM15, OFI, VWAPD, CARRY, YIELD, RSI14]);
-
-  // FPT
-  const mu_d  = pem.cas * 0.002;
-  const sig_d = ATR14 > 0 ? ATR14 / Math.max(livePrice, 1) : 0.008;
-  const fpt   = useMemo(() => computeFPT(tpD, slD, beD, mu_d, sig_d, dir === "LONG" ? 1 : -1),
-    [tpD, slD, beD, mu_d, sig_d, dir]);
-
-  // Sizing
-  const riskUSD  = capital * (riskPct / 100);
-  const fixedSz  = slD > 0 ? riskUSD / slD : 0;
-  const kellyF   = kellyFrac(fpt.pTP, fpt.rr, 0.25);
-  const kellyUSD = capital * kellyF;
-
-  // Verdict
-  const ctrTrend   = (dir === "LONG" && !bull) || (dir === "SHORT" && bull);
-  const confidence = clamp(sigmoid(pem.cas * PEM_W.K * 0.9) * 100, 1, 99);
-  const noTrade    = regime === "RANGING" || regime === "LOW_VOL" || fpt.ev <= 0 || fpt.rr < cfg.minRR;
-  const verdict    = noTrade ? "NO TRADE" : confidence > 72 ? "HIGH CONF" : confidence > 52 ? "VALID" : "MARGINAL";
-
-  // Clock
-  const [tick, setTick] = useState(new Date());
-  useEffect(() => {
-    const id = setInterval(() => setTick(new Date()), 1000);
-    return () => clearInterval(id);
-  }, []);
-
-  // Formatters
-  const f2  = (n: number) => n.toFixed(2);
-  const f3  = (n: number) => n.toFixed(3);
-  const f4  = (n: number) => n.toFixed(4);
-  const fp  = (n: number) => `${(n * 100).toFixed(1)}%`;
-  const fpm = (n: number) => `${n >= 0 ? "+" : ""}${(n * 100).toFixed(1)}%`;
-  const col = (n: number) => n > 0 ? C.green : n < 0 ? C.red : C.text;
-
-  const verdictCol  = verdict === "NO TRADE" ? C.red : verdict === "HIGH CONF" ? C.green : verdict === "VALID" ? C.accent : C.yellow;
-  const signalCol   = pem.signal === "LONG" ? C.green : pem.signal === "SHORT" ? C.red : C.yellow;
-  const regimeColor: Record<Regime, string> = { TRENDING: C.green, RANGING: C.yellow, VOLATILE: C.red, LOW_VOL: C.muted };
-
-  // ── TAB NAV ──────────────────────────────────────────────────────────────
-
-  const NavBtn = ({ id, lbl }: { id: Tab; lbl: string }) => (
-    <button onClick={() => setTab(id)} style={{
-      fontFamily: MONO, fontSize: 10, letterSpacing: "0.1em", padding: "7px 18px",
-      cursor: "pointer", background: tab === id ? C.bg2 : "transparent",
-      color: tab === id ? C.accent : C.sub,
-      border: "none", borderRight: `1px solid ${C.border}`,
-      borderBottom: `2px solid ${tab === id ? C.accent : "transparent"}`,
-      outline: "none", transition: "all 0.12s",
-    }}>{lbl}</button>
+  const { mu: muBridge, hasBridge } = useMemo(
+    () => calcMuBridge(direction, bridge, rsi14, zSc, momentum, trendStr, bullish),
+    [direction, bridge, rsi14, zSc, momentum, trendStr, bullish]
   );
 
-  // ── SIDEBAR ───────────────────────────────────────────────────────────────
+  // ── Run Monte Carlo ─────────────────────────────────────────────
+  const runMC = useCallback(() => {
+    setMcRunning(true);
+    // Defer para no bloquear UI
+    setTimeout(() => {
+      const result = runMonteCarlo(
+        entry, sl, tp, garch, kalman, ou,
+        muBridge, hasBridge, cfg.mcPaths, regime
+      );
+      setMcResult(result);
+      setMcRunning(false);
+    }, 50);
+  }, [entry, sl, tp, garch, kalman, ou, muBridge, hasBridge, cfg.mcPaths, regime]);
 
-  const sidebar = (
-    <div style={{ display: "flex", flexDirection: "column", gap: 8, width: 210, flexShrink: 0 }}>
+  // Auto-run MC cuando cambian parámetros clave
+  useEffect(() => { runMC(); }, [entry, sl, tp, direction, mode]);
 
-      {/* Calc mode */}
-      <div style={{ background: C.bg1, border: `1px solid ${C.border}`, borderRadius: 3 }}>
-        <PHead left="CALC MODE" />
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 1, padding: 8 }}>
-          <Btn label="AUTO"   active={calcMode === "AUTO"}   onClick={() => setCalcMode("AUTO")} />
-          <Btn label="MANUAL" active={calcMode === "MANUAL"} onClick={() => setCalcMode("MANUAL")} />
+  // ── Derived from MC ─────────────────────────────────────────────
+  const pTP = mcResult?.pTP ?? 0.5;
+  const pSL = mcResult?.pSL ?? 0.5;
+  const tpUSD      = tpDist * 100;
+  const slUSD      = slDist * 100;
+  const expectancy = pTP * tpUSD - pSL * slUSD;
+  const breakEven  = 1 / (1 + rr);
+  const edge       = pTP - breakEven;
+  const kellyFrac  = kelly(pTP, rr);
+  const riskUSD    = capital * 0.01;
+  const posSize    = slDist > 0 ? riskUSD / slDist : 0;
+  const kellySizeUSD = capital * kellyFrac * 0.5; // half-kelly
+  const sigma_daily = Math.sqrt(garch.sigma2.at(-1) ?? 1e-4);
+
+  // Brier score (simulado con los paths del MC como proxy)
+  const brierEst = mcResult
+    ? brierScore(mcResult.pTP_paths.slice(0, 100), mcResult.pTP_paths.slice(0, 100).map(p => p > 0.5 ? 1 : 0))
+    : 0;
+
+  // Confidence compuesta
+  const confidence = clamp(
+    (pTP > 0.5 ? (pTP - 0.5) * 2 : 0) * 60 +
+    (edge > 0 ? Math.min(edge * 100, 30) : 0) +
+    (!counter ? 10 : 0),
+    1, 99
+  );
+
+  const noTrade =
+    regime === "RANGING" || regime === "LOW_VOL" ||
+    expectancy <= 0 || edge <= 0 ||
+    confidence < cfg.minConf || rr < cfg.minRR ||
+    pTP < 0.52;
+
+  const verdict =
+    noTrade           ? "NO TRADE" :
+    confidence > 72   ? "HIGH CONFIDENCE" :
+    confidence > 55   ? "VALID" : "MARGINAL";
+
+  const phase = detectPhase(rsi14, zSc, volExp, trendStr, ou, livePrice);
+
+  // Zones — memoize derived arrays para evitar referencias inestables
+  const gexLevels = useMemo(
+    () => bridge?.gamma_exposure ?? [],
+    [bridge]
+  );
+  const dpLevels = useMemo(
+    () => (bridge?.dark_pool ?? []).map(d => ({ price: d.price, size: d.size })),
+    [bridge]
+  );
+  const zones = useMemo(
+    () => calcZones(livePrice, atr14, lastEMA20, lastEMA50, sigma_daily, gexLevels, dpLevels),
+    [livePrice, atr14, lastEMA20, lastEMA50, sigma_daily, gexLevels, dpLevels]
+  );
+
+  // ── Colors ──────────────────────────────────────────────────────
+  const RC: Record<Regime, string> = {
+    TRENDING: "text-emerald-400", RANGING: "text-yellow-400",
+    VOLATILE: "text-orange-400",  LOW_VOL: "text-sky-400",
+    SQUEEZE:  "text-violet-400",  EXHAUSTION: "text-rose-400",
+  };
+  const PC: Record<Phase, string> = {
+    ABSORPTION: "text-cyan-400", DISTRIBUTION: "text-orange-400",
+    CONTINUATION: "text-emerald-400", EXHAUSTION: "text-rose-400",
+    SQUEEZE: "text-violet-400", UNKNOWN: "text-slate-500",
+  };
+  const VC =
+    verdict === "NO TRADE"        ? "border-rose-900 text-rose-400" :
+    verdict === "HIGH CONFIDENCE" ? "border-emerald-600 text-emerald-300" :
+    verdict === "VALID"           ? "border-emerald-800 text-emerald-400" :
+                                    "border-yellow-800 text-yellow-400";
+
+  // ══════════════════════════════════════════════════════════════
+  // RENDER
+  // ══════════════════════════════════════════════════════════════
+
+  return (
+    <div className="w-full max-w-4xl mx-auto bg-[#050a05] text-emerald-400 font-mono border border-emerald-900/50 rounded-2xl overflow-hidden">
+
+      {/* TOP BAR */}
+      <div className="px-5 py-3 bg-emerald-950/30 border-b border-emerald-900/40 flex justify-between items-center">
+        <div>
+          <div className="text-xs text-emerald-700 tracking-[0.3em] uppercase">Ak Quant Engine</div>
+          <div className="text-[10px] text-emerald-900 mt-0.5">GARCH · KALMAN · OU · MONTE CARLO · FAT TAILS</div>
+        </div>
+        <div className="flex items-center gap-3">
+          <span className={`text-[10px] px-2 py-0.5 rounded border ${
+            bridgeStatus === "LIVE"       ? "border-emerald-700 text-emerald-400" :
+            bridgeStatus === "CONNECTING" ? "border-yellow-700 text-yellow-500" :
+                                            "border-rose-900 text-rose-600"
+          }`}>
+            {bridgeStatus === "LIVE" ? "● LIVE" : bridgeStatus === "CONNECTING" ? "◌ …" : "○ OFFLINE"}
+          </span>
+          <div className="text-right">
+            <div className="text-2xl font-bold leading-none">${livePrice.toFixed(2)}</div>
+            <div className={`text-[10px] mt-0.5 ${RC[regime]}`}>{regime}</div>
+          </div>
         </div>
       </div>
 
-      {/* Timeframe */}
-      <div style={{ background: C.bg1, border: `1px solid ${C.border}`, borderRadius: 3 }}>
-        <PHead left="TIMEFRAME" right={cfg.label} />
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 1, padding: 8 }}>
-          {(["SCALP", "INTRADAY", "SWING"] as Mode[]).map((m) => (
-            <Btn key={m} label={m} active={mode === m} onClick={() => setMode(m)} />
-          ))}
-        </div>
-        <div style={{ padding: "0 10px 6px", fontSize: 9, color: C.label }}>minRR · {cfg.minRR}R</div>
+      {/* TABS */}
+      <div className="flex border-b border-emerald-900/40 px-2">
+        {(["CALC", "MONTECARLO", "ZONES", "RISK", "EXPLANATION"] as Tab[]).map(t => (
+          <button key={t} onClick={() => setTab(t)}
+            className={`px-3 py-2 text-[10px] font-bold tracking-widest transition-colors border-b-2 ${
+              tab === t
+                ? "border-emerald-400 text-emerald-300"
+                : "border-transparent text-emerald-800 hover:text-emerald-600"
+            }`}>
+            {t}
+          </button>
+        ))}
       </div>
 
-      {/* Direction */}
-      <div style={{ background: C.bg1, border: `1px solid ${C.border}`, borderRadius: 3 }}>
-        <PHead left="DIRECTION" />
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 1, padding: 8 }}>
-          <Btn label="▲ LONG"  active={dir === "LONG"}  onClick={() => setDir("LONG")}  ac={C.green} />
-          <Btn label="▼ SHORT" active={dir === "SHORT"} onClick={() => setDir("SHORT")} ac={C.red}   />
-        </div>
-      </div>
+      <div className="p-5">
 
-      {/* Manual levels */}
-      {calcMode === "MANUAL" && (
-        <div style={{ background: C.bg1, border: `1px solid ${C.border}`, borderRadius: 3 }}>
-          <PHead left="LEVELS" />
-          <div style={{ padding: 8, display: "flex", flexDirection: "column", gap: 6 }}>
-            {([
-              ["ENTRY",       entry, setEntry, C.text],
-              ["STOP LOSS",   sl,    setSL,    C.red],
-              ["TAKE PROFIT", tp,    setTP,    C.green],
-              ["BREAK EVEN",  be,    setBE,    C.yellow],
-            ] as [string, number, (n: number) => void, string][]).map(([lbl, val, set, vc]) => (
-              <div key={lbl}>
-                <div style={{ fontSize: 9, color: C.sub, letterSpacing: "0.08em", marginBottom: 3 }}>{lbl}</div>
-                <input
-                  type="number" value={val} step="0.01"
-                  onChange={(e) => set(+e.target.value)}
-                  style={{
-                    background: C.bg3, border: `1px solid ${vc}44`, borderRadius: 2,
-                    color: vc, fontFamily: MONO, fontSize: 12, padding: "4px 8px",
-                    width: "100%", outline: "none",
-                  }}
-                />
+        {/* ═══ CALC ═══ */}
+        {tab === "CALC" && (
+          <div className="space-y-4">
+
+            {/* Controls */}
+            <div className="grid grid-cols-2 gap-2">
+              {(["AUTO", "MANUAL"] as CalcMode[]).map(m => (
+                <button key={m} onClick={() => setCalcMode(m)}
+                  className={`py-2 rounded text-xs font-bold border transition-all ${calcMode === m ? "bg-emerald-400 text-black border-emerald-400" : "border-emerald-900 text-emerald-700 hover:border-emerald-600 hover:text-emerald-400"}`}>
+                  {m}
+                </button>
+              ))}
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              {(["SCALP", "INTRADAY", "SWING"] as Mode[]).map(m => (
+                <button key={m} onClick={() => setMode(m)}
+                  className={`py-2 rounded text-xs font-bold border transition-all ${mode === m ? "bg-emerald-400 text-black border-emerald-400" : "border-emerald-900 text-emerald-700 hover:border-emerald-600 hover:text-emerald-400"}`}>
+                  {m}
+                </button>
+              ))}
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              {(["LONG", "SHORT"] as Direction[]).map(d => (
+                <button key={d} onClick={() => setDirection(d)}
+                  className={`py-2 rounded text-xs font-bold border transition-all ${
+                    direction === d
+                      ? d === "LONG" ? "bg-emerald-500 text-black border-emerald-500" : "bg-rose-700 text-white border-rose-700"
+                      : "border-emerald-900 text-emerald-700 hover:border-emerald-600 hover:text-emerald-400"
+                  }`}>{d}</button>
+              ))}
+            </div>
+
+            <div>
+              <label className="text-[10px] text-emerald-800 block mb-1">CAPITAL ($)</label>
+              <input type="number" value={capital}
+                onChange={e => setCapital(Number(e.target.value))}
+                className="w-full bg-black/60 border border-emerald-900 focus:border-emerald-600 p-2 rounded text-sm outline-none text-emerald-300" />
+            </div>
+
+            {calcMode === "MANUAL" && (
+              <div className="grid grid-cols-3 gap-2">
+                {[
+                  { label: "ENTRY",       val: entry, set: setEntry, bc: "border-emerald-800" },
+                  { label: "STOP LOSS",   val: sl,    set: setSL,    bc: "border-rose-900"    },
+                  { label: "TAKE PROFIT", val: tp,    set: setTP,    bc: "border-emerald-600" },
+                ].map(({ label, val, set, bc }) => (
+                  <div key={label}>
+                    <label className={`text-[10px] mb-1 block ${label === "STOP LOSS" ? "text-rose-600" : "text-emerald-700"}`}>{label}</label>
+                    <input type="number" value={val}
+                      onChange={e => set(Number(e.target.value))}
+                      className={`w-full bg-black/60 border ${bc} focus:border-emerald-500 p-2 rounded text-sm outline-none text-emerald-300`} />
+                  </div>
+                ))}
               </div>
-            ))}
+            )}
+
+            {/* MC status */}
+            {mcRunning && (
+              <div className="text-[10px] text-emerald-700 animate-pulse">
+                ◌ Simulando {cfg.mcPaths} paths Monte Carlo…
+              </div>
+            )}
+
+            {/* METRICS GRID */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+              <M label="P(TP) MC"     val={`${(pTP*100).toFixed(1)}%`}    c={pTP > 0.55 ? "text-emerald-300" : "text-yellow-400"} />
+              <M label="P(SL) MC"     val={`${(pSL*100).toFixed(1)}%`}    c="text-rose-400" />
+              <M label="CONFIDENCE"   val={`${confidence.toFixed(0)}%`}   c={confidence > 65 ? "text-emerald-300" : "text-yellow-400"} />
+              <M label="EXPECTANCY"   val={`$${expectancy.toFixed(2)}`}    c={expectancy > 0 ? "text-emerald-400" : "text-rose-400"} />
+              <M label="EDGE"         val={`${(edge*100).toFixed(1)}%`}    c={edge > 0 ? "text-emerald-400" : "text-rose-400"} />
+              <M label="R:R"          val={`1:${rr.toFixed(2)}`}           c="text-emerald-400" />
+              <M label="KELLY f*"     val={`${(kellyFrac*100).toFixed(1)}%`} c="text-cyan-400" />
+              <M label="σ GARCH"      val={`${(Math.sqrt(garch.sigma2.at(-1)??0)*100).toFixed(4)}%`} c="text-sky-400" />
+              <M label="μ KALMAN"     val={kalman.mu.toFixed(6)}           c={kalman.mu > 0 ? "text-cyan-400" : "text-orange-400"} />
+              <M label="OU θ"         val={ou.theta.toFixed(3)}            c={ou.theta > 1 ? "text-violet-400" : "text-slate-400"} />
+              <M label="RSI"          val={rsi14.toFixed(1)}               c={rsi14>70?"text-rose-400":rsi14<30?"text-cyan-400":"text-emerald-400"} />
+              <M label="Z-SCORE"      val={zSc.toFixed(2)}                 c={Math.abs(zSc)>2?"text-violet-400":"text-emerald-400"} />
+            </div>
+
+            {/* Phase + Regime */}
+            <div className="grid grid-cols-2 gap-2">
+              <div className="border border-emerald-900/50 rounded p-3 bg-emerald-950/20">
+                <div className="text-[10px] text-emerald-800 mb-1">MARKET PHASE</div>
+                <div className={`font-bold ${PC[phase]}`}>{phase}</div>
+              </div>
+              <div className="border border-emerald-900/50 rounded p-3 bg-emerald-950/20">
+                <div className="text-[10px] text-emerald-800 mb-1">OU REGIME</div>
+                <div className={`font-bold text-xs ${ou.theta > 1.5 ? "text-cyan-400" : ou.theta < 0.3 ? "text-orange-400" : "text-emerald-400"}`}>
+                  {ou.theta > 1.5 ? "MEAN REVERTING" : ou.theta < 0.3 ? "RANDOM WALK" : "MILD REVERSION"}
+                  <span className="text-emerald-800 ml-1">θ={ou.theta.toFixed(2)}</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Bridge data */}
+            {bridgeStatus === "LIVE" && bridge && (
+              <div className="border border-emerald-900/30 rounded p-3 text-[10px] bg-emerald-950/10">
+                <div className="text-emerald-700 mb-2 font-bold tracking-widest">ENGINE DATA</div>
+                <div className="grid grid-cols-3 gap-2">
+                  <div className="text-emerald-800">COMBINED<br/><span className={`font-bold text-sm ${bridge.combined_score > 0 ? "text-emerald-400" : "text-rose-400"}`}>{bridge.combined_score.toFixed(4)}</span></div>
+                  <div className="text-emerald-800">OPT FLOW<br/><span className={`font-bold text-sm ${bridge.option_flow_score > 0 ? "text-emerald-400" : "text-rose-400"}`}>{bridge.option_flow_score.toFixed(4)}</span></div>
+                  <div className="text-emerald-800">DARK POOL<br/><span className={`font-bold text-sm ${bridge.dark_pool_score > 0 ? "text-emerald-400" : "text-rose-400"}`}>{bridge.dark_pool_score.toFixed(4)}</span></div>
+                </div>
+              </div>
+            )}
+
+            {/* VERDICT */}
+            <div className={`border rounded-xl p-4 ${VC}`}>
+              <div className="text-xl font-bold mb-3 tracking-widest">{verdict}</div>
+              <div className="grid grid-cols-2 gap-x-8 gap-y-1 text-xs">
+                <div>ENTRY <span className="float-right text-emerald-300">${entry.toFixed(2)}</span></div>
+                <div>SIZE (1%) <span className="float-right text-emerald-300">{posSize.toFixed(4)} oz</span></div>
+                <div className="text-rose-500">STOP LOSS <span className="float-right">${sl.toFixed(2)}</span></div>
+                <div>KELLY SIZE <span className="float-right text-cyan-400">${kellySizeUSD.toFixed(0)}</span></div>
+                <div className="text-emerald-300">TAKE PROFIT <span className="float-right">${tp.toFixed(2)}</span></div>
+                <div>BREAK EVEN <span className="float-right">{(breakEven*100).toFixed(1)}%</span></div>
+                <div>COUNTER TREND <span className={`float-right ${counter ? "text-rose-400" : "text-emerald-400"}`}>{counter ? "YES ⚠" : "NO ✓"}</span></div>
+                <div>TREND <span className={`float-right ${bullish ? "text-emerald-400" : "text-rose-400"}`}>{bullish ? "BULLISH" : "BEARISH"}</span></div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ═══ MONTE CARLO ═══ */}
+        {tab === "MONTECARLO" && (
+          <div className="space-y-4">
+            <div className="flex justify-between items-center">
+              <div>
+                <div className="text-xs font-bold text-emerald-400 tracking-widest">MONTE CARLO SIMULATION</div>
+                <div className="text-[10px] text-emerald-800 mt-0.5">
+                  {cfg.mcPaths} paths · GARCH(1,1) + Student-t ν=5 · OU drift
+                </div>
+              </div>
+              <button onClick={runMC}
+                className={`px-3 py-1.5 rounded border text-xs font-bold transition-all ${mcRunning ? "border-emerald-900 text-emerald-900" : "border-emerald-600 text-emerald-400 hover:bg-emerald-400 hover:text-black"}`}>
+                {mcRunning ? "RUNNING…" : "RE-RUN"}
+              </button>
+            </div>
+
+            {mcResult ? (
+              <>
+                {/* Path visualization */}
+                <div className="border border-emerald-900/50 rounded-xl p-4 bg-emerald-950/10">
+                  <div className="text-[10px] text-emerald-800 mb-3">DISTRIBUCIÓN DE PATHS (P10 / MEDIANA / P90)</div>
+                  <MCPathViz
+                    median={mcResult.medianPath} p10={mcResult.percentile10}
+                    p90={mcResult.percentile90} sl={sl} tp={tp} entry={entry}
+                  />
+                </div>
+
+                {/* MC metrics */}
+                <div className="grid grid-cols-2 gap-2">
+                  <M label="P(TP) MC"          val={`${(mcResult.pTP*100).toFixed(2)}%`}    c="text-emerald-300" />
+                  <M label="P(SL) MC"           val={`${(mcResult.pSL*100).toFixed(2)}%`}    c="text-rose-400" />
+                  <M label="VaR 95%"            val={`$${(mcResult.var95*100).toFixed(2)}`}  c="text-orange-400" />
+                  <M label="CVaR / ES"          val={`$${(mcResult.expectedShortfall*100).toFixed(2)}`} c="text-rose-400" />
+                  <M label="PATHS SIMULADOS"    val={mcResult.nPaths.toString()}             c="text-emerald-700" />
+                  <M label="CONVERGENCIA"       val={mcResult.converged ? "✓ OK" : "⚠ BAJA"} c={mcResult.converged ? "text-emerald-400" : "text-yellow-400"} />
+                </div>
+
+                {/* GARCH sigma history sparkline */}
+                <div className="border border-emerald-900/50 rounded p-3 bg-emerald-950/10">
+                  <div className="text-[10px] text-emerald-800 mb-2">σ GARCH(1,1) — VOLATILIDAD CON MEMORIA</div>
+                  <Sparkline data={garch.sigma2.slice(-80).map(s => Math.sqrt(s) * 100)} height={45} />
+                  <div className="text-[10px] text-emerald-800 mt-1">
+                    σ actual: <span className="text-emerald-400">{(Math.sqrt(garch.sigma2.at(-1)??0)*100).toFixed(4)}%</span>
+                    &nbsp;·&nbsp; ω={garch.omega.toExponential(1)} α={garch.alpha} β={garch.beta}
+                  </div>
+                </div>
+
+                {/* Kalman mu history */}
+                <div className="border border-emerald-900/50 rounded p-3 bg-emerald-950/10">
+                  <div className="text-[10px] text-emerald-800 mb-2">μ KALMAN — DRIFT ESTIMADO</div>
+                  <div className="text-[10px] text-emerald-700">
+                    μ = <span className={`font-bold ${kalman.mu > 0 ? "text-emerald-400" : "text-rose-400"}`}>{kalman.mu.toFixed(7)}</span>
+                    &nbsp; P={kalman.P.toExponential(2)} Q={kalman.Q.toExponential(2)}
+                  </div>
+                  <div className="text-[10px] text-emerald-800 mt-1">
+                    {kalman.mu > 0 ? "Drift positivo — precio tiende a subir" : "Drift negativo — precio tiende a bajar"}
+                  </div>
+                </div>
+
+                {/* OU */}
+                <div className="border border-emerald-900/50 rounded p-3 bg-emerald-950/10">
+                  <div className="text-[10px] text-emerald-800 mb-2">ORNSTEIN-UHLENBECK — RÉGIMEN</div>
+                  <div className="grid grid-cols-3 gap-2 text-[10px]">
+                    <div className="text-emerald-800">θ (velocidad rev.)<br/><span className={`font-bold text-sm ${ou.theta > 1 ? "text-violet-400" : "text-slate-400"}`}>{ou.theta.toFixed(3)}</span></div>
+                    <div className="text-emerald-800">μ_OU (media)<br/><span className="font-bold text-sm text-emerald-400">{ou.mu_ou.toFixed(2)}</span></div>
+                    <div className="text-emerald-800">σ_OU<br/><span className="font-bold text-sm text-sky-400">{ou.sigma_ou.toFixed(3)}</span></div>
+                  </div>
+                  <div className="mt-2 text-[10px] text-emerald-800">
+                    {ou.theta > 1.5
+                      ? "⟳ Régimen mean-reverting fuerte — entradas contra-tendencia tienen edge"
+                      : ou.theta < 0.3
+                      ? "→ Random walk dominante — seguir tendencia, no counter-trend"
+                      : "≈ Reversión leve — combinar con trend y momentum"}
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="text-center text-emerald-900 py-12 text-sm">
+                {mcRunning ? "Simulando…" : "Establece los parámetros y vuelve aquí."}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ═══ ZONES ═══ */}
+        {tab === "ZONES" && (
+          <ZonesTab
+            zones={zones}
+            livePrice={livePrice}
+            bridgeStatus={bridgeStatus}
+          />
+        )}
+
+        {/* ═══ RISK ═══ */}
+        {tab === "RISK" && (
+          <div className="space-y-3">
+            <div className="text-xs font-bold text-emerald-400 tracking-widest mb-3">GESTIÓN DE RIESGO CUANTITATIVA</div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="border border-emerald-900/50 rounded-xl p-4 bg-emerald-950/10 col-span-2">
+                <div className="text-[10px] text-emerald-800 mb-1">KELLY CRITERION</div>
+                <div className="text-2xl font-bold text-cyan-400">{(kellyFrac*100).toFixed(2)}%</div>
+                <div className="text-[10px] text-emerald-800 mt-1">
+                  f* = (p·b − q) / b = ({pTP.toFixed(3)}·{rr.toFixed(2)} − {pSL.toFixed(3)}) / {rr.toFixed(2)}
+                </div>
+                <div className="mt-2 grid grid-cols-2 gap-2 text-[10px]">
+                  <div className="text-emerald-800">Half-Kelly (recomendado)<br/><span className="text-cyan-400 font-bold">${kellySizeUSD.toFixed(0)}</span></div>
+                  <div className="text-emerald-800">Sizing 1% risk (actual)<br/><span className="text-emerald-400 font-bold">{posSize.toFixed(4)} oz</span></div>
+                </div>
+              </div>
+
+              <div className="border border-orange-900/50 rounded-xl p-4 bg-orange-950/10">
+                <div className="text-[10px] text-orange-700 mb-1">VaR 95%</div>
+                <div className="text-xl font-bold text-orange-400">${(mcResult?.var95??0*100).toFixed(2)}</div>
+                <div className="text-[10px] text-orange-800 mt-1">Pérdida máxima en 95% de escenarios</div>
+              </div>
+
+              <div className="border border-rose-900/50 rounded-xl p-4 bg-rose-950/10">
+                <div className="text-[10px] text-rose-700 mb-1">CVaR / Expected Shortfall</div>
+                <div className="text-xl font-bold text-rose-400">${(mcResult?.expectedShortfall??0*100).toFixed(2)}</div>
+                <div className="text-[10px] text-rose-800 mt-1">Pérdida promedio en el peor 5%</div>
+              </div>
+
+              <div className="border border-emerald-900/50 rounded-xl p-4 bg-emerald-950/10 col-span-2">
+                <div className="text-[10px] text-emerald-800 mb-2">ANÁLISIS DE RUINA</div>
+                <div className="text-[10px] text-emerald-700 space-y-1">
+                  <div>Trades para ruina con 1% risk: <span className="text-emerald-400">{Math.ceil(Math.log(0.01) / Math.log(1 - 0.01))}</span> consecutivos perdedores</div>
+                  <div>Drawdown máximo teórico (MC): <span className="text-orange-400">{(pSL * 100).toFixed(1)}% probabilidad de SL en este trade</span></div>
+                  <div>Expectancy por $1 arriesgado: <span className={expectancy > 0 ? "text-emerald-400" : "text-rose-400"}>${(expectancy / Math.max(slUSD, 1)).toFixed(3)}</span></div>
+                </div>
+              </div>
+
+              <div className="border border-sky-900/50 rounded-xl p-4 bg-sky-950/10 col-span-2">
+                <div className="text-[10px] text-sky-700 mb-2">BRIER SCORE (CALIBRACIÓN)</div>
+                <div className="text-xl font-bold text-sky-400">{brierEst.toFixed(4)}</div>
+                <div className="text-[10px] text-sky-800 mt-1">
+                  0 = perfectamente calibrado · 1 = completamente descalibrado<br/>
+                  Nota: calibración real requiere backtest histórico de trades.
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ═══ EXPLANATION ═══ */}
+        {tab === "EXPLANATION" && (
+          <div className="space-y-3 text-[10px] leading-relaxed">
+            <Sec title="GARCH(1,1) — VOLATILIDAD CON MEMORIA">
+              <p className="font-mono bg-emerald-950/30 p-2 rounded text-emerald-300 mb-2">{"σ²(t) = ω + α·ε²(t-1) + β·σ²(t-1)"}</p>
+              <p className="text-emerald-800">GBM simple asume σ constante — incorrecto. GARCH reconoce que volatilidad alta hoy predice volatilidad alta mañana (clustering). α=0.08 captura el shock reciente, β=0.90 da memoria larga. Resultado: σ dinámica que se adapta al mercado actual.</p>
+            </Sec>
+            <Sec title="KALMAN FILTER — DRIFT ADAPTATIVO">
+              <p className="font-mono bg-emerald-950/30 p-2 rounded text-emerald-300 mb-2">{"μ(t) = μ(t-1) + K · (r(t) − μ(t-1))"}</p>
+              <p className="text-emerald-800">El drift μ no es fijo — cambia con el mercado. El Kalman Filter lo estima como variable latente, actualizándose con cada nuevo retorno. K (ganancia de Kalman) balancea confianza en predicción vs observación nueva. Más riguroso que promediar retornos.</p>
+            </Sec>
+            <Sec title="ORNSTEIN-UHLENBECK — RÉGIMEN">
+              <p className="font-mono bg-emerald-950/30 p-2 rounded text-emerald-300 mb-2">{"dS = θ(μ_OU − S)dt + σ_OU·dW"}</p>
+              <p className="text-emerald-800">θ mide mean reversion. Si θ &gt; 1.5 → el precio tiene atracción fuerte hacia μ_OU, entradas counter-trend tienen ventaja estadística. Si θ &lt; 0.3 → random walk, seguir tendencia. Estimado por OLS sobre los últimos 60 cierres.</p>
+            </Sec>
+            <Sec title="MONTE CARLO CON FAT TAILS">
+              <p className="font-mono bg-emerald-950/30 p-2 rounded text-emerald-300 mb-2">{"S(t+1) = S(t) + μ·dt + σ_GARCH · t_ν · √dt"}</p>
+              <p className="text-emerald-800">En vez de FPT analítico (que asume GBM perfecto), simulamos {cfg.mcPaths} paths. El shock usa distribución Student-t con ν=5 grados de libertad — colas más pesadas que normal, capturando spikes reales del oro. P(TP) = fracción de paths que tocan TP antes que SL.</p>
+            </Sec>
+            <Sec title="KELLY CRITERION">
+              <p className="font-mono bg-emerald-950/30 p-2 rounded text-emerald-300 mb-2">{"f* = (p·b − q) / b"}</p>
+              <p className="text-emerald-800">Tamaño óptimo de posición que maximiza crecimiento logarítmico del capital a largo plazo. b = R:R, p = P(TP), q = P(SL). En práctica usar half-Kelly (f*/2) para reducir drawdown. Si f* &lt; 0 → no hay edge matemático, no operar.</p>
+            </Sec>
+            <Sec title="CVaR — EXPECTED SHORTFALL">
+              <p className="text-emerald-800">VaR 95% dice "en el 95% de casos no pierdes más de X". CVaR dice "en el peor 5% de casos, pierdes en promedio Y". CVaR es más honesto para gestión de riesgo — VaR ignora la magnitud de pérdidas extremas.</p>
+            </Sec>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════
+// SUB COMPONENTS
+// ══════════════════════════════════════════════════════════════════
+
+function M({ label, val, c }: { label: string; val: string; c: string }) {
+  return (
+    <div className="border border-emerald-900/50 rounded-lg p-2.5 bg-emerald-950/10">
+      <div className="text-[9px] text-emerald-800 mb-1 tracking-wider">{label}</div>
+      <div className={`text-sm font-bold ${c}`}>{val}</div>
+    </div>
+  );
+}
+
+function ZonesTab({
+  zones, livePrice, bridgeStatus,
+}: {
+  zones: Zone[];
+  livePrice: number;
+  bridgeStatus: "CONNECTING" | "LIVE" | "OFFLINE";
+}) {
+  // Guardar en estado local para que un error no mate el tab padre
+  const [renderError, setRenderError] = useState<string | null>(null);
+
+  const safeZones = useMemo(() => {
+    try {
+      return (zones ?? []).filter(z =>
+        z &&
+        typeof z.price      === "number" && isFinite(z.price) &&
+        typeof z.pReaction  === "number" && isFinite(z.pReaction) &&
+        typeof z.label      === "string" &&
+        typeof z.type       === "string" &&
+        typeof z.strength   === "number"
+      );
+    } catch (e) {
+      setRenderError(String(e));
+      return [];
+    }
+  }, [zones]);
+
+  if (renderError) {
+    return (
+      <div className="border border-rose-900 rounded p-4 text-[10px] text-rose-500">
+        Error renderizando zonas: {renderError}
+      </div>
+    );
+  }
+
+  const safePrice = typeof livePrice === "number" && isFinite(livePrice) ? livePrice : 0;
+
+  return (
+    <div className="space-y-2">
+      <div className="text-[10px] text-emerald-800 border border-emerald-900/40 rounded p-3 mb-3">
+        Zonas ordenadas por P(reacción). Precio:{" "}
+        <span className="text-emerald-400">${safePrice.toFixed(2)}</span>
+        {bridgeStatus !== "LIVE" && (
+          <span className="ml-2 text-yellow-700">— Solo EMA20/50 (bridge offline)</span>
+        )}
+      </div>
+
+      {safeZones.length === 0 && (
+        <div className="text-center text-emerald-900 py-8 text-xs">
+          Sin zonas calculadas.
+          <div className="mt-2 text-[10px] text-emerald-950">
+            Asegúrate de tener datos de precio cargados.
           </div>
         </div>
       )}
 
-      {/* Capital */}
-      <div style={{ background: C.bg1, border: `1px solid ${C.border}`, borderRadius: 3 }}>
-        <PHead left="CAPITAL & RISK" />
-        <div style={{ padding: 8, display: "flex", flexDirection: "column", gap: 6 }}>
-          <div>
-            <div style={{ fontSize: 9, color: C.sub, letterSpacing: "0.08em", marginBottom: 3 }}>CAPITAL ($)</div>
-            <input type="number" value={capital} onChange={(e) => setCapital(+e.target.value)}
-              style={{ background: C.bg3, border: `1px solid ${C.border2}`, borderRadius: 2, color: C.text, fontFamily: MONO, fontSize: 12, padding: "4px 8px", width: "100%", outline: "none" }} />
-          </div>
-          <div>
-            <div style={{ fontSize: 9, color: C.sub, letterSpacing: "0.08em", marginBottom: 3, display: "flex", justifyContent: "space-between" }}>
-              <span>RISK %</span><span style={{ color: C.accent }}>{riskPct}%</span>
+      {safeZones.map((z, i) => {
+        const pct     = Math.round(clamp(z.pReaction, 0, 1) * 100);
+        const dist    = Math.abs(z.price - safePrice);
+        const barColor =
+          z.pReaction > 0.65 ? "bg-emerald-400" :
+          z.pReaction > 0.45 ? "bg-yellow-500"  : "bg-rose-600";
+        const textColor =
+          z.pReaction > 0.65 ? "text-emerald-300" :
+          z.pReaction > 0.45 ? "text-yellow-400"  : "text-rose-400";
+
+        return (
+          <div
+            key={i}
+            className={`border rounded-lg p-3 ${
+              z.type === "SUPPORT" ? "border-emerald-900/60" : "border-rose-900/60"
+            }`}
+          >
+            <div className="flex justify-between items-center mb-2">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className={`text-[10px] font-bold ${
+                  z.type === "SUPPORT" ? "text-emerald-500" : "text-rose-500"
+                }`}>
+                  {z.type}
+                </span>
+                <span className="text-emerald-700 text-[10px]">{z.label}</span>
+                {z.source && (
+                  <span className="text-[9px] text-emerald-900 border border-emerald-900/40 px-1 rounded">
+                    {z.source}
+                  </span>
+                )}
+              </div>
+              <div className="text-right ml-2">
+                <div className="font-bold text-emerald-300 text-sm">
+                  ${z.price.toFixed(2)}
+                </div>
+                <div className="text-[10px] text-emerald-800">
+                  {dist.toFixed(2)} pts
+                </div>
+              </div>
             </div>
-            <input type="range" min={0.5} max={5} step={0.5} value={riskPct}
-              onChange={(e) => setRiskPct(+e.target.value)}
-              style={{ width: "100%", accentColor: C.accent }} />
-          </div>
-          <Row label="RISK $" val={`$${riskUSD.toFixed(0)}`} vc={C.yellow} />
-        </div>
-      </div>
 
-      {/* Market state */}
-      <div style={{ background: C.bg1, border: `1px solid ${C.border}`, borderRadius: 3 }}>
-        <PHead left="MARKET STATE" />
-        <Row label="REGIME"    val={regime}                  vc={regimeColor[regime]} />
-        <Row label="TREND"     val={bull ? "BULLISH" : "BEARISH"} vc={bull ? C.green : C.red} />
-        <Row label="VOL EXP"   val={`${f2(volExp)}×`}        vc={volExp > 1.5 ? C.red : C.text} />
-        <Row label="TREND STR" val={f2(trendStr)}             vc={trendStr > 0.5 ? C.green : C.muted} />
-        <Row label="CTR TREND" val={ctrTrend ? "YES" : "NO"} vc={ctrTrend ? C.red : C.green} />
-        <Row label="RSI 14"    val={RSI14.toFixed(1)}         vc={RSI14 < 30 ? C.green : RSI14 > 70 ? C.red : C.text} />
-        <Row label="ATR 14"    val={f2(ATR14)}                vc={C.text} />
-        <Row label="OU θ"      val={THETA.toFixed(4)}         vc={col(THETA - 0.1)} />
-      </div>
+            <div className="flex justify-between text-[10px] mb-1">
+              <span className="text-emerald-800">P(REACCIÓN)</span>
+              <span className={`font-bold ${textColor}`}>{pct}%</span>
+            </div>
+            <div className="w-full bg-emerald-950 rounded-full h-1">
+              <div
+                className={`h-1 rounded-full ${barColor}`}
+                style={{ width: `${pct}%` }}
+              />
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
+}
 
-  // ── VERDICT BAR ──────────────────────────────────────────────────────────
-
-  const verdictBar = (
-    <div style={{ background: C.bg1, border: `1px solid ${C.border}`, borderRadius: 3, overflow: "hidden", marginBottom: 8 }}>
-      {/* prob gradient line */}
-      <div style={{ height: 2, display: "flex" }}>
-        <div style={{ width: `${(pem.pLong * 100).toFixed(1)}%`, background: C.green, transition: "width 0.4s" }} />
-        <div style={{ flex: 1, background: C.red }} />
-      </div>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)" }}>
-        <Cell label="VERDICT"    val={verdict}          vc={verdictCol} />
-        <Cell label="PEM SIGNAL" val={pem.signal}       vc={signalCol} />
-        <Cell label="P(LONG)"    val={fp(pem.pLong)}    vc={C.green}   sub="threshold 65%" />
-        <Cell label="CONFIDENCE" val={`${confidence.toFixed(1)}%`} vc={C.accent} />
-        <Cell label="CAS · OU θ" val={`${f4(pem.cas)} · ${THETA.toFixed(3)}`} vc={col(pem.cas)} />
-      </div>
-    </div>
-  );
-
-  // ── TAB: OVERVIEW ─────────────────────────────────────────────────────────
-
-  const tabOverview = (
-    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-
-      {/* Levels */}
-      <div style={{ background: C.bg1, border: `1px solid ${C.border}`, borderRadius: 3, overflow: "hidden" }}>
-        <PHead left={`TRADE LEVELS · ${dir} · ${mode}`} right={cfg.label} />
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 1 }}>
-          <Cell label="ENTRY"        val={`$${f2(entry)}`}  vc={C.text} />
-          <Cell label="STOP LOSS"    val={`$${f2(sl)}`}     vc={C.red}    sub={`${f2(slD)} pts risk`} />
-          <Cell label="TAKE PROFIT"  val={`$${f2(tp)}`}     vc={C.green}  sub={`${f2(tpD)} pts target`} />
-          <Cell label="BREAK EVEN"   val={beValid ? `$${f2(be)}` : "— (set in manual)"} vc={beValid ? C.yellow : C.muted} sub={beValid ? `${f2(beD)} pts` : ""} />
-        </div>
-      </div>
-
-      {/* FPT grid */}
-      <div style={{ background: C.bg1, border: `1px solid ${C.border}`, borderRadius: 3, overflow: "hidden" }}>
-        <PHead left="FIRST PASSAGE TIME · GBM 2-BARRIER (Harrison 1985)" />
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(6,1fr)", gap: 1 }}>
-          <Cell label="P(TP FIRST)"  val={fp(fpt.pTP)}   vc={fpt.pTP > 0.5 ? C.green : C.red} />
-          <Cell label="P(SL FIRST)"  val={fp(fpt.pSL)}   vc={fpt.pSL > 0.5 ? C.red : C.text} />
-          <Cell label="P(BE FIRST)"  val={beValid ? fp(fpt.pBE) : "—"} vc={beValid ? C.yellow : C.muted} />
-          <Cell label="EV (pts)"      val={f2(fpt.ev)}    vc={col(fpt.ev)}  sub={fpt.ev > 0 ? "positive edge" : "negative edge"} />
-          <Cell label="R:R"           val={`1:${f2(fpt.rr)}`} vc={fpt.rr >= cfg.minRR ? C.green : C.red} sub={`min ${cfg.minRR}R`} />
-          <Cell label="MIN WIN%"      val={fp(fpt.minWR)} vc={C.text} />
-        </div>
-      </div>
-
-      {/* Sizing */}
-      <div style={{ background: C.bg1, border: `1px solid ${C.border}`, borderRadius: 3, overflow: "hidden" }}>
-        <PHead left="POSITION SIZING · KELLY FRACTIONAL 25%" />
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 1 }}>
-          <Cell label="FIXED SIZE"   val={`${fixedSz.toFixed(4)} oz`}      vc={C.text} sub="risk$/slDist" />
-          <Cell label="KELLY RAW f*" val={fp(Math.max(0, fpt.kelly))}      vc={col(fpt.kelly)} />
-          <Cell label="KELLY 25%"    val={`${(kellyF * 100).toFixed(2)}%`} vc={kellyF > 0 ? C.green : C.muted} />
-          <Cell label="KELLY $"      val={`$${kellyUSD.toFixed(0)}`}        vc={kellyF > 0 ? C.green : C.muted} />
-          <Cell label="RISK $"       val={`$${riskUSD.toFixed(0)}`}         vc={C.yellow} />
-        </div>
-      </div>
-
-      {/* Live indicators */}
-      <div style={{ background: C.bg1, border: `1px solid ${C.border}`, borderRadius: 3, overflow: "hidden" }}>
-        <PHead left="LIVE INDICATORS (CALCULATED FROM 15M CANDLES)" />
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 1 }}>
-          <Cell label="OFI"       val={f3(OFI)}   vc={col(OFI)}   sub="order flow imbal." />
-          <Cell label="VWAP DEV"  val={f3(VWAPD)} vc={col(VWAPD)} sub="norm. deviation" />
-          <Cell label="Z-20"      val={f3(Z20)}   vc={col(-Z20)}  sub="rolling z-score" />
-          <Cell label="Z-60"      val={f3(Z60)}   vc={col(-Z60)}  sub="rolling z-score" />
-          <Cell label="STOCH %K"  val={fp(STOCH)} vc={STOCH < 0.2 ? C.green : STOCH > 0.8 ? C.red : C.text} sub="0–1 norm." />
-          <Cell label="ANOM M5"   val={f4(AM5)}   vc={col(AM5)} />
-          <Cell label="ANOM M15"  val={f4(AM15)}  vc={col(AM15)} />
-          <Cell label="CARRY"     val={f4(CARRY)} vc={col(CARRY)} />
-          <Cell label="YIELD"     val={f4(YIELD)} vc={col(YIELD)} />
-          <Cell label="RSI 14"    val={RSI14.toFixed(1)} vc={RSI14 < 30 ? C.green : RSI14 > 70 ? C.red : C.text} />
-        </div>
-      </div>
-    </div>
-  );
-
-  // ── TAB: PEM ──────────────────────────────────────────────────────────────
-
-  const tabPEM = (
-    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-      <div style={{ background: C.bg1, border: `1px solid ${C.border}`, borderRadius: 3, overflow: "hidden" }}>
-        <PHead left="PEM — PROBABILISTIC EDGE MODEL · 3-LAYER ARCHITECTURE" />
-        <div style={{ padding: "6px 12px", fontSize: 10, color: C.sub, borderBottom: `1px solid ${C.border}`, lineHeight: 1.9 }}>
-          <span style={{ color: C.purple }}>CAS</span> = <span style={{ color: C.accent }}>0.40</span>·S_MR +{" "}
-          <span style={{ color: C.accent }}>0.45</span>·S_MIC + <span style={{ color: C.accent }}>0.15</span>·S_FAC
-          {"   →   "}
-          <span style={{ color: C.green }}>P(LONG)</span> = σ(3·CAS){"   →   "}
-          <span style={{ color: signalCol }}>SIGNAL: {pem.signal}</span>
-        </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 1 }}>
-          {/* S_MR */}
-          <div style={{ background: C.bg2, padding: "10px 12px", borderRight: `1px solid ${C.border}` }}>
-            <div style={{ fontSize: 9, color: C.accent, letterSpacing: "0.1em", marginBottom: 4 }}>S_MR · MEAN REVERSION (α=0.40)</div>
-            <div style={{ fontSize: 20, fontWeight: 500, color: col(pem.sMR), marginBottom: 8, fontFamily: MONO }}>{f4(pem.sMR)}</div>
-            {[
-              ["w=0.30 · z-score 20", -Z20,    fpm(-Z20)],
-              ["w=0.25 · z-score 60", -Z60,    fpm(-Z60)],
-              ["w=0.25 · stochastic", 0.5-STOCH, fpm(0.5-STOCH)],
-              ["w=0.10 · anom M5",    -AM5,    fpm(-AM5)],
-              ["w=0.10 · anom M15",   -AM15,   fpm(-AM15)],
-            ].map(([l, v, d]) => (
-              <div key={l as string} style={{ display: "flex", justifyContent: "space-between", fontSize: 9, padding: "3px 0", borderTop: `1px solid ${C.dim}` }}>
-                <span style={{ color: C.sub }}>{l as string}</span>
-                <span style={{ color: col(v as number) }}>{d as string}</span>
-              </div>
-            ))}
-          </div>
-          {/* S_MIC */}
-          <div style={{ background: C.bg2, padding: "10px 12px", borderRight: `1px solid ${C.border}` }}>
-            <div style={{ fontSize: 9, color: C.accent, letterSpacing: "0.1em", marginBottom: 4 }}>S_MIC · MICROSTRUCTURE (α=0.45)</div>
-            <div style={{ fontSize: 20, fontWeight: 500, color: col(pem.sMIC), marginBottom: 8, fontFamily: MONO }}>{f4(pem.sMIC)}</div>
-            {[
-              ["w=0.70 · OFI",      OFI,   fpm(OFI)],
-              ["w=0.30 · VWAP dev", VWAPD, fpm(VWAPD)],
-            ].map(([l, v, d]) => (
-              <div key={l as string} style={{ display: "flex", justifyContent: "space-between", fontSize: 9, padding: "3px 0", borderTop: `1px solid ${C.dim}` }}>
-                <span style={{ color: C.sub }}>{l as string}</span>
-                <span style={{ color: col(v as number) }}>{d as string}</span>
-              </div>
-            ))}
-          </div>
-          {/* S_FAC */}
-          <div style={{ background: C.bg2, padding: "10px 12px" }}>
-            <div style={{ fontSize: 9, color: C.accent, letterSpacing: "0.1em", marginBottom: 4 }}>S_FAC · FACTOR BIAS (α=0.15)</div>
-            <div style={{ fontSize: 20, fontWeight: 500, color: col(pem.sFAC), marginBottom: 8, fontFamily: MONO }}>{f4(pem.sFAC)}</div>
-            {[
-              ["w=0.35 · carry",  -CARRY,        fpm(-CARRY)],
-              ["w=0.40 · yield",  -YIELD,        fpm(-YIELD)],
-              ["w=0.25 · RSI",    RSI14/100-0.5, fpm(RSI14/100-0.5)],
-            ].map(([l, v, d]) => (
-              <div key={l as string} style={{ display: "flex", justifyContent: "space-between", fontSize: 9, padding: "3px 0", borderTop: `1px solid ${C.dim}` }}>
-                <span style={{ color: C.sub }}>{l as string}</span>
-                <span style={{ color: col(v as number) }}>{d as string}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* P bar */}
-      <div style={{ background: C.bg1, border: `1px solid ${C.border}`, borderRadius: 3, overflow: "hidden" }}>
-        <PHead left="PROBABILITY DISTRIBUTION · P(LONG) vs P(SHORT)" />
-        <div style={{ padding: "10px 14px" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, marginBottom: 6 }}>
-            <span style={{ color: C.green }}>LONG {fp(pem.pLong)}</span>
-            <span style={{ color: C.sub }}>65 / 35 threshold</span>
-            <span style={{ color: C.red }}>SHORT {fp(pem.pShort)}</span>
-          </div>
-          <div style={{ position: "relative", height: 24, background: C.dim, borderRadius: 2, overflow: "hidden" }}>
-            <div style={{
-              position: "absolute", left: 0, top: 0, height: "100%",
-              width: `${(pem.pLong * 100).toFixed(1)}%`,
-              background: `${C.green}44`, borderRight: `2px solid ${C.green}`,
-              transition: "width 0.4s",
-            }} />
-            <div style={{ position: "absolute", left: "65%", top: 0, height: "100%", width: 1, background: `${C.accent}88` }} />
-            <div style={{ position: "absolute", left: "35%", top: 0, height: "100%", width: 1, background: `${C.red}88` }} />
-            <div style={{
-              position: "absolute", top: "50%", left: `${(pem.pLong * 100).toFixed(1)}%`,
-              transform: "translateY(-50%)",
-              width: 2, height: "80%", background: C.green,
-            }} />
-          </div>
-          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, marginTop: 3, color: C.label }}>
-            <span>SHORT ZONE (0–35%)</span>
-            <span>NO TRADE (35–65%)</span>
-            <span>LONG ZONE (65–100%)</span>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-
-  // ── TAB: FPT ──────────────────────────────────────────────────────────────
-
-  const tabFPT = (
-    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-      <div style={{ background: C.bg1, border: `1px solid ${C.border}`, borderRadius: 3, overflow: "hidden" }}>
-        <PHead left="FIRST PASSAGE TIME · GBM 2-BARRIER" />
-        <div style={{ padding: "5px 12px", fontSize: 9, color: C.sub, borderBottom: `1px solid ${C.border}`, lineHeight: 1.9 }}>
-          θ = 2μ̃/σ²{"  ·  "}
-          P(TP) = (1 − e<sup>θb</sup>) / (e<sup>θa</sup> − e<sup>θb</sup>){"  ·  "}
-          EV = P(TP)·a − P(SL)·b
-        </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 1 }}>
-          <Cell label="P(TP HIT FIRST)" val={fp(fpt.pTP)}   vc={fpt.pTP > 0.5 ? C.green : C.red}   sub="upside target" />
-          <Cell label="P(SL HIT FIRST)" val={fp(fpt.pSL)}   vc={fpt.pSL > 0.5 ? C.red : C.text}    sub="stopout prob" />
-          <Cell label="P(BE HIT FIRST)" val={beValid ? fp(fpt.pBE) : "— set BE in manual"} vc={beValid ? C.yellow : C.muted} />
-          <Cell label="EXPECTED VALUE"   val={`${f2(fpt.ev)} pts`} vc={col(fpt.ev)} sub={fpt.ev > 0 ? "edge positive" : "edge negative"} />
-          <Cell label="RISK:REWARD"      val={`1:${f2(fpt.rr)}`}  vc={fpt.rr >= cfg.minRR ? C.green : C.red} sub={`min ${cfg.minRR}R required`} />
-          <Cell label="MIN WIN RATE"     val={fp(fpt.minWR)}       vc={C.text} sub="for EV breakeven" />
-        </div>
-      </div>
-
-      <div style={{ background: C.bg1, border: `1px solid ${C.border}`, borderRadius: 3, overflow: "hidden" }}>
-        <PHead left="DRIFT PARAMETERS" />
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 1 }}>
-          <Cell label="TP DIST" val={`${f2(tpD)} pts`}  vc={C.green} />
-          <Cell label="SL DIST" val={`${f2(slD)} pts`}  vc={C.red} />
-          <Cell label="BE DIST" val={beValid ? `${f2(beD)} pts` : "—"} vc={C.yellow} />
-          <Cell label="DRIFT μ̃" val={`${(mu_d * 10000).toFixed(2)} bps`} vc={col(mu_d)} />
-          <Cell label="σ (ATR/px)" val={`${(sig_d * 100).toFixed(3)}%`} vc={C.text} />
-          <Cell label="θ (drift param)" val={(2 * mu_d / Math.max(sig_d ** 2, 1e-10)).toFixed(3)} vc={C.text} />
-          <Cell label="ATR 14" val={f2(ATR14)} vc={C.text} />
-          <Cell label="OU SPEED θ" val={THETA.toFixed(4)} vc={col(THETA - 0.1)} sub="AR(1) revert speed" />
-        </div>
-      </div>
-
-      <div style={{ background: C.bg1, border: `1px solid ${C.border}`, borderRadius: 3, overflow: "hidden" }}>
-        <PHead left="EV DECOMPOSITION" />
-        <div style={{ padding: "10px 14px" }}>
-          <div style={{ fontSize: 10, color: C.sub, marginBottom: 8, lineHeight: 1.8 }}>
-            EV = P(TP) × TP − P(SL) × SL = {fp(fpt.pTP)} × {f2(tpD)} − {fp(fpt.pSL)} × {f2(slD)} ={"  "}
-            <span style={{ color: col(fpt.ev), fontWeight: 500, fontSize: 13 }}>{f2(fpt.ev)} pts</span>
-          </div>
-          <div style={{ position: "relative", height: 12, background: C.dim, borderRadius: 2, overflow: "hidden" }}>
-            <div style={{
-              position: "absolute", left: 0, top: 0, height: "100%",
-              width: `${Math.min(100, fpt.pTP * 100).toFixed(0)}%`,
-              background: fpt.ev > 0 ? `${C.green}44` : `${C.red}44`,
-              transition: "width 0.3s",
-            }} />
-          </div>
-          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: C.label, marginTop: 4 }}>
-            <span>win contribution: {f2(fpt.pTP * tpD)}</span>
-            <span>loss contribution: {f2(fpt.pSL * slD)}</span>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-
-  // ── TAB: RISK ─────────────────────────────────────────────────────────────
-
-  const tabRisk = (
-    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-      <div style={{ background: C.bg1, border: `1px solid ${C.border}`, borderRadius: 3, overflow: "hidden" }}>
-        <PHead left="KELLY CRITERION · FRACTIONAL 25%" />
-        <div style={{ padding: "5px 12px", fontSize: 9, color: C.sub, borderBottom: `1px solid ${C.border}` }}>
-          f* = p − (1−p)/RR{"   "}·{"   "}f_used = f* × 0.25
-        </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 1 }}>
-          <Cell label="CAPITAL"      val={`$${capital.toLocaleString()}`}    vc={C.text} />
-          <Cell label="RISK %"       val={`${riskPct}%`}                    vc={C.text} />
-          <Cell label="RISK $"       val={`$${riskUSD.toFixed(0)}`}          vc={C.yellow} />
-          <Cell label="SL DIST"      val={`${f2(slD)} pts`}                  vc={C.red} />
-          <Cell label="FIXED SIZE"   val={`${fixedSz.toFixed(4)} oz`}        vc={C.text} sub="risk$/slDist" />
-          <Cell label="KELLY RAW f*" val={fp(Math.max(0, fpt.kelly))}       vc={col(fpt.kelly)} sub="full kelly" />
-          <Cell label="KELLY 25%"    val={`${(kellyF * 100).toFixed(2)}%`}  vc={kellyF > 0 ? C.green : C.muted} sub="fractional" />
-          <Cell label="KELLY $"      val={`$${kellyUSD.toFixed(0)}`}         vc={kellyF > 0 ? C.green : C.muted} />
-        </div>
-      </div>
-
-      <div style={{ background: C.bg1, border: `1px solid ${C.border}`, borderRadius: 3, overflow: "hidden" }}>
-        <PHead left="ORNSTEIN-UHLENBECK PROCESS · MEAN REVERSION SPEED" />
-        <div style={{ padding: "5px 12px", fontSize: 9, color: C.sub, borderBottom: `1px solid ${C.border}` }}>
-          dX_t = θ(μ−X_t)dt + σdW_t{"   "}·{"   "}θ estimated via AR(1) autocorrelation (lag-1)
-        </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 1 }}>
-          <Cell label="OU SPEED θ"   val={THETA.toFixed(4)} vc={col(THETA - 0.1)} sub="higher = faster revert" />
-          <Cell label="Z-SCORE 20"   val={f3(Z20)}  vc={col(-Z20)} sub="oversold if < −1" />
-          <Cell label="Z-SCORE 60"   val={f3(Z60)}  vc={col(-Z60)} sub="structural level" />
-          <Cell label="VOL EXPANSION" val={`${f2(volExp)}×`} vc={volExp > 1.5 ? C.red : C.green} sub="atr14/atr50" />
-        </div>
-      </div>
-
-      <div style={{ background: C.bg1, border: `1px solid ${C.border}`, borderRadius: 3, overflow: "hidden" }}>
-        <PHead left="EXECUTION PLAN" />
-        {([
-          ["INSTRUMENT",  "XAUUSD CFD",                            C.text],
-          ["DIRECTION",   dir,                                      dir === "LONG" ? C.green : C.red],
-          ["MODE",        `${mode} · ${cfg.label}`,                C.text],
-          ["ENTRY",       `$${f2(entry)}`,                         C.text],
-          ["STOP LOSS",   `$${f2(sl)}   (distance: ${f2(slD)})`,  C.red],
-          ["TAKE PROFIT", `$${f2(tp)}   (distance: ${f2(tpD)})`,  C.green],
-          ["BREAK EVEN",  beValid ? `$${f2(be)}   (${f2(beD)} pts)` : "not set (use manual mode)", beValid ? C.yellow : C.muted],
-          ["R:R",         `1:${f2(fpt.rr)}   (min ${cfg.minRR}R)`, fpt.rr >= cfg.minRR ? C.green : C.red],
-          ["REGIME",      regime,                                   regimeColor[regime]],
-          ["CTR TREND",   ctrTrend ? "YES  ⚠" : "NO  ✓",          ctrTrend ? C.red : C.green],
-          ["VERDICT",     verdict,                                   verdictCol],
-        ] as [string, string, string][]).map(([l, v, vc]) => (
-          <Row key={l} label={l} val={v} vc={vc} />
-        ))}
-      </div>
-    </div>
-  );
-
-  // ── RENDER ────────────────────────────────────────────────────────────────
-
+function Sec({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <>
-      <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&display=swap');
-        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.25} }
-        * { box-sizing:border-box; }
-        input[type=number]::-webkit-outer-spin-button,
-        input[type=number]::-webkit-inner-spin-button { -webkit-appearance:none; }
-        input[type=number] { -moz-appearance:textfield; }
-      `}</style>
-
-      <div style={{ fontFamily: MONO, background: C.bg0, color: C.text, fontSize: 12, lineHeight: 1.4, border: `1px solid ${C.border}`, borderRadius: 3 }}>
-
-        {/* TOPBAR */}
-        <div style={{ background: C.bg1, borderBottom: `1px solid ${C.border}`, padding: "6px 14px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 20 }}>
-            <span style={{ fontSize: 10, color: C.sub, letterSpacing: "0.15em" }}>AK-INC</span>
-            <span style={{ color: C.border2 }}>│</span>
-            <span style={{ fontSize: 10, color: C.accent, letterSpacing: "0.1em" }}>XAUUSD CFD</span>
-            <span style={{ fontSize: 18, fontWeight: 500, color: C.text }}>${f2(livePrice)}</span>
-            <span style={{
-              fontSize: 11, padding: "2px 8px", borderRadius: 2,
-              color: (priceData?.change ?? 0) >= 0 ? C.green : C.red,
-              background: ((priceData?.change ?? 0) >= 0 ? C.green : C.red) + "18",
-              border: `1px solid ${((priceData?.change ?? 0) >= 0 ? C.green : C.red)}44`,
-            }}>
-              {(priceData?.change ?? 0) >= 0 ? "+" : ""}{f2(priceData?.change ?? 0)} ({f2(priceData?.changePct ?? 0)}%)
-            </span>
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 16, fontSize: 10, color: C.sub }}>
-            <span>H {f2(priceData?.high ?? 0)}</span>
-            <span>L {f2(priceData?.low  ?? 0)}</span>
-            <span>ATR {f2(ATR14)}</span>
-            <span>RSI {RSI14.toFixed(1)}</span>
-            <span>OFI {f3(OFI)}</span>
-            <span style={{ color: C.accent }}>{tick.toTimeString().slice(0, 8)}</span>
-            <span style={{ width: 7, height: 7, borderRadius: "50%", background: C.green, display: "inline-block", animation: "pulse 1.4s infinite" }} />
-          </div>
-        </div>
-
-        {/* TAB NAV */}
-        <div style={{ display: "flex", background: C.bg1, borderBottom: `1px solid ${C.border}` }}>
-          <NavBtn id="OVERVIEW" lbl="OVERVIEW" />
-          <NavBtn id="PEM"      lbl="PEM MODEL" />
-          <NavBtn id="FPT"      lbl="TP/SL PROB" />
-          <NavBtn id="RISK"     lbl="RISK & SIZING" />
-        </div>
-
-        {/* BODY */}
-        <div style={{ display: "flex", gap: 8, padding: 10, alignItems: "flex-start" }}>
-          {sidebar}
-          <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 0 }}>
-            {verdictBar}
-            {tab === "OVERVIEW" && tabOverview}
-            {tab === "PEM"      && tabPEM}
-            {tab === "FPT"      && tabFPT}
-            {tab === "RISK"     && tabRisk}
-          </div>
-        </div>
-
-      </div>
-    </>
+    <div className="border border-emerald-900/50 rounded-lg p-3 bg-emerald-950/10">
+      <div className="text-emerald-500 font-bold mb-2 tracking-widest text-[10px]">{title}</div>
+      {children}
+    </div>
   );
 }
