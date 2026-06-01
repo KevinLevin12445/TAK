@@ -13,15 +13,16 @@ function buildVolumeProfile(
   const maxPrice = Math.max(...bars.map((b) => b.high));
   const binSize = (maxPrice - minPrice) / nBins || 1;
 
-  const profile: { price: number; buyVol: number; sellVol: number; volume: number; poc: boolean; vah: boolean; val: boolean }[] = Array.from({ length: nBins }, (_, i) => ({
-    price: parseFloat((minPrice + (i + 0.5) * binSize).toFixed(2)),
-    buyVol: 0,
-    sellVol: 0,
-    volume: 0,
-    poc: false,
-    vah: false,
-    val: false,
-  }));
+  const profile: { price: number; buyVol: number; sellVol: number; volume: number; poc: boolean; vah: boolean; val: boolean }[] =
+    Array.from({ length: nBins }, (_, i) => ({
+      price: parseFloat((minPrice + (i + 0.5) * binSize).toFixed(2)),
+      buyVol: 0,
+      sellVol: 0,
+      volume: 0,
+      poc: false,
+      vah: false,
+      val: false,
+    }));
 
   for (const bar of bars) {
     const isBuy = bar.close >= bar.open;
@@ -42,9 +43,9 @@ function buildVolumeProfile(
   const poc = profile[pocIdx].price;
 
   const totalVol = profile.reduce((a, p) => a + p.volume, 0);
-  let cumVol = 0;
   let vah = poc, val = poc;
   const sortedByVol = [...profile].sort((a, b) => b.volume - a.volume);
+  let cumVol = 0;
   for (const p of sortedByVol) {
     cumVol += p.volume;
     if (cumVol <= totalVol * 0.7) {
@@ -70,8 +71,26 @@ router.get("/volume-profile", async (req, res) => {
   const nBins    = parseInt((req.query.bins as string) || "50", 10);
 
   try {
-    const bars = await fetchOHLCV(GOLD_TICKER, interval, period);
-    if (!bars.length) return res.json({ profile: [], poc: 0, vah: 0, val: 0, ticker: GOLD_TICKER, currentPrice: 0 });
+    // Primary fetch
+    let bars = await fetchOHLCV(GOLD_TICKER, interval, period);
+
+    // Fallback 1: if too few bars, try longer period
+    if (bars.length < 10) {
+      const fallback1 = period === "1d" ? "5d" : period === "2d" ? "5d" : "1mo";
+      req.log.warn({ interval, period, fallback: fallback1 }, "volume-profile: primary fetch empty, retrying");
+      bars = await fetchOHLCV(GOLD_TICKER, interval, fallback1);
+    }
+
+    // Fallback 2: if still empty, use daily interval
+    if (bars.length < 10) {
+      req.log.warn({ interval, period }, "volume-profile: fallback still empty, using 1d/3mo");
+      bars = await fetchOHLCV(GOLD_TICKER, "1d", "3mo");
+    }
+
+    if (!bars.length) {
+      res.json({ profile: [], poc: 0, vah: 0, val: 0, ticker: GOLD_TICKER, currentPrice: 0 });
+      return;
+    }
 
     const { profile, poc, vah, val } = buildVolumeProfile(bars, nBins);
     const currentPrice = bars[bars.length - 1].close;

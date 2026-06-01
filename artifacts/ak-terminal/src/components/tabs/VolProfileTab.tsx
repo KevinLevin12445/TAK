@@ -9,8 +9,8 @@ const INTERVALS = ["1m","5m","15m","30m","1h","1d"];
 const PERIODS   = ["1d","2d","5d","1mo"];
 
 export function VolProfileTab() {
-  const [interval, setInterval] = useState("5m");
-  const [period,   setPeriod]   = useState("1d");
+  const [interval, setInterval] = useState("15m");
+  const [period,   setPeriod]   = useState("5d");
 
   const { data, isLoading, refetch } = useGetVolumeProfile(
     { interval, period },
