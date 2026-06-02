@@ -12,9 +12,14 @@
     "@esbuild/win32-x64": "0.28.0",
     "@rollup/rollup-win32-x64-msvc": "^4.60.4",
     "@tailwindcss/oxide-win32-x64-msvc": "^4.3.0",
+    "@types/react-plotly.js": "^2.6.4",
     "esbuild": "0.28.0",
     "lightningcss-win32-x64-msvc": "^1.32.0",
     "prettier": "^3.8.3",
     "typescript": "~5.9.3"
+  },
+  "dependencies": {
+    "plotly.js": "^3.5.1",
+    "react-plotly.js": "^2.6.0"
   }
 }

@@ -160,4 +160,5 @@ overrides:
   esbuild: "0.28.0"
 
 allowBuilds:
+  es5-ext: true
   esbuild: true

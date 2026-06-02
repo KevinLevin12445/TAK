@@ -1,4 +1,3 @@
-
 import numpy as np
 import pandas as pd
 import warnings
@@ -8,12 +7,6 @@ STATE_LABELS = {0: "TREND", 1: "MEAN_REVERSION", 2: "HIGH_VOLATILITY"}
 STATE_COLORS = {0: "#00ff41", 1: "#ffd700", 2: "#ff4444"}
 
 class HMMEngine:
-    """
-    Gaussian HMM con 3 estados ocultos entrenado sobre retornos y volatilidad.
-    Se utiliza para filtrar señales: por ejemplo, evitar operar en HIGH_VOLATILITY 
-    o preferir MEAN_REVERSION para ciertas estrategias.
-    """
-
     def __init__(self, n_components: int = 3, n_iter: int = 250, random_state: int = 42):
         self.n_components = n_components
         self.n_iter = n_iter
@@ -31,11 +24,12 @@ class HMMEngine:
 
     def fit(self, returns: pd.Series, vol: pd.Series):
         obs = self._build_obs(returns, vol)
-        if len(obs) < 50: # Mayor umbral para estabilidad
+        if len(obs) < 50:
             self.fitted = False
             return self
 
         try:
+            # Intento de cargar HMM (Librería nativa de estados ocultos)
             from hmmlearn.hmm import GaussianHMM
             model = GaussianHMM(
                 n_components=self.n_components,
@@ -49,40 +43,30 @@ class HMMEngine:
             self.state_probs = model.predict_proba(obs)
             self._use_hmmlearn = True
         except Exception:
+            # CORRECCIÓN: Si falla por compilación en Windows, entra un algoritmo matemático real (GMM)
             self._use_hmmlearn = False
-            self._rule_based(obs)
+            self._gmm_clustering_fallback(obs)
 
         self._relabel_states(returns)
         self.fitted = True
         return self
 
-    def _rule_based(self, obs: np.ndarray):
-        ret = obs[:, 0]
-        vol = obs[:, 1]
-        vol_q = pd.Series(vol).rank(pct=True)
-        
-        states = np.zeros(len(obs), dtype=int)
-        for i in range(len(obs)):
-            if vol_q[i] >= 0.80:
-                states[i] = 2 # HIGH_VOLATILITY
-            elif abs(ret[i]) > np.std(ret) * 1.5:
-                states[i] = 0 # TREND (movimiento fuerte)
-            else:
-                states[i] = 1 # MEAN_REVERSION (ruido normal)
-
-        n = len(obs)
-        probs = np.zeros((n, self.n_components))
-        for i in range(n):
-            probs[i, states[i]] = 0.9
-            others = [j for j in range(self.n_components) if j != states[i]]
-            for j in others:
-                probs[i, j] = 0.05
-
-        self.states = states
-        self.state_probs = probs
+    def _gmm_clustering_fallback(self, obs: np.ndarray):
+        """Alternativa matemática rigurosa usando Modelos de Mezclas Gaussianas."""
+        from sklearn.mixture import GaussianMixture
+        model = GaussianMixture(
+            n_components=self.n_components,
+            covariance_type="full",
+            max_iter=self.n_iter,
+            random_state=self.random_state
+        )
+        model.fit(obs)
+        self.model = model
+        self.states = model.predict(obs)
+        self.state_probs = model.predict_proba(obs)
 
     def _relabel_states(self, returns: pd.Series):
-        """Re-ordena los estados para que sean consistentes con STATE_LABELS."""
+        """Asigna etiquetas de forma consistente sin importar el orden de inicialización."""
         ret_vals = returns.reindex(self._obs_index).values
         n_states = self.n_components
 
@@ -97,12 +81,9 @@ class HMMEngine:
                 state_means.append(np.abs(ret_vals[mask]).mean())
                 state_vols.append(ret_vals[mask].std())
 
-        # HIGH_VOLATILITY es el estado con mayor desviación estándar
         hv_state = int(np.argmax(state_vols))
-        # TREND es el estado con mayor retorno absoluto medio entre los restantes
         remaining_for_trend = [s for s in range(n_states) if s != hv_state]
         trend_state = remaining_for_trend[int(np.argmax([state_means[s] for s in remaining_for_trend]))]
-        # MEAN_REVERSION es el que queda
         mr_state = [s for s in range(n_states) if s not in [hv_state, trend_state]][0]
 
         mapping = {trend_state: 0, mr_state: 1, hv_state: 2}
@@ -137,14 +118,9 @@ class HMMEngine:
         return pd.Series(self.states, index=self._obs_index, name="HMM_State")
 
     def is_safe_to_trade(self) -> bool:
-        """
-        Filtro de seguridad: evita operar en regímenes de alta volatilidad extrema
-        o cuando el modelo no está seguro del estado actual.
-        """
         if not self.fitted: return False
         state = self.current_state()
         probs = self.current_probs()
-        # Evitar operar si estamos en HIGH_VOLATILITY o si la confianza del estado es baja
-        if state == 2: return False
-        if max(probs.values()) < 0.60: return False
+        if state == 2: return False  # Bloquear si es HIGH_VOLATILITY
+        if max(probs.values()) < 0.60: return False  # Bloquear si no hay consenso estadístico
         return True

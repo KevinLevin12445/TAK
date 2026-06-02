@@ -13,6 +13,7 @@ import { MapTab } from "@/components/tabs/MapTab";
 import { VwapTab } from "@/components/tabs/VwapTab";
 import { AnomalyTab } from "@/components/tabs/AnomalyTab";
 import { VolProfileTab } from "@/components/tabs/VolProfileTab";
+import { BsVolTab } from "@/components/tabs/BsVolTab";
 import { useWebNotifications } from "@/hooks/useWebNotifications";
 
 const TABS = [
@@ -20,6 +21,7 @@ const TABS = [
   { id: "command",    label: "⊹ COMMAND" },
   { id: "kalman",     label: "⊹ KALMAN" },
   { id: "hmm",        label: "⊹ HMM REGIMES" },
+  { id: "bsvol",      label: "⊹ BS/VOL" },
   { id: "heatmap",    label: "⊹ HEATMAP" },
   { id: "gc3d",       label: "⊹ GC3D" },
   { id: "risk",       label: "⊹ RISK" },
@@ -57,8 +59,10 @@ export default function Terminal() {
       <TopTicker />
 
       {/* Navigation Tabs */}
-      <div className="w-full border-b border-primary/30 bg-black flex overflow-x-auto overflow-y-hidden items-stretch"
-        style={{ scrollbarWidth: "none" }}>
+      <div
+        className="w-full border-b border-primary/30 bg-black flex overflow-x-auto overflow-y-hidden items-stretch"
+        style={{ scrollbarWidth: "none" }}
+      >
         {TABS.map((tab) => {
           const badge = tab.id === "map" ? totalAlerts : 0;
           return (
@@ -102,7 +106,8 @@ export default function Terminal() {
         <div
           className="fixed inset-0 pointer-events-none z-50 opacity-[0.02]"
           style={{
-            backgroundImage: "repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,255,65,0.5) 2px, rgba(0,255,65,0.5) 3px)",
+            backgroundImage:
+              "repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,255,65,0.5) 2px, rgba(0,255,65,0.5) 3px)",
           }}
         />
 
@@ -110,6 +115,7 @@ export default function Terminal() {
         {activeTab === "command"    && <Command />}
         {activeTab === "kalman"     && <KalmanTab />}
         {activeTab === "hmm"        && <HmmRegimes />}
+        {activeTab === "bsvol"      && <BsVolTab />}
         {activeTab === "heatmap"    && <HeatmapTab />}
         {activeTab === "gc3d"       && <Gc3dTab />}
         {activeTab === "risk"       && <RiskPanel />}
