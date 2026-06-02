@@ -101,25 +101,17 @@ class FeatureEngine:
         insider_score = self.insider_engine.score_series.reindex(gold_price.index).ffill().fillna(0)
         feat_list.append(insider_score.rename("InsiderScore"))
 
-        # CORRECCIÓN: Cointegración Dinámica (Rolling OLS) para matar el Lookahead Bias
         if "DXY" in prices.columns:
             dxy = prices["DXY"]
-            w = 60  # Ventana de cálculo móvil
-            
-            # Cálculo estadístico sin usar bucles lentos (Vectorizado)
+            w = 60
             roll_mean_x = dxy.rolling(w).mean()
             roll_mean_y = gold_price.rolling(w).mean()
             roll_cov = gold_price.rolling(w).cov(dxy)
             roll_var_x = dxy.rolling(w).var()
-            
-            # Betas y Alphas históricos punto por punto
             rolling_beta = (roll_cov / roll_var_x).fillna(0)
             rolling_alpha = (roll_mean_y - rolling_beta * roll_mean_x).fillna(0)
-            
-            # El spread real en el tiempo t solo usa datos disponibles hasta t
             spread = gold_price - (rolling_beta * dxy) - rolling_alpha
             z_coint = (spread - spread.rolling(w).mean()) / spread.rolling(w).std()
-            
             feat_list.append(z_coint.rename("Coint_ZScore"))
             self.coint_result = {
                 "spread": spread,
@@ -128,7 +120,13 @@ class FeatureEngine:
                 "r_squared": float((roll_cov**2 / (roll_var_x * gold_price.rolling(w).var())).fillna(0).iloc[-1]),
             }
 
-        self.features = pd.concat(feat_list, axis=1).dropna()
+        feat_list_clean = []
+        for s in feat_list:
+            s = s.copy()
+            if hasattr(s.index, 'tz') and s.index.tz is not None:
+                s.index = s.index.tz_localize(None)
+            feat_list_clean.append(s)
+        self.features = pd.concat(feat_list_clean, axis=1).dropna()
 
         try:
             bs = self.bs_engine
