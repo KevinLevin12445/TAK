@@ -46,6 +46,10 @@ def rolling_zscore(series: pd.Series, window: int = 20) -> pd.Series:
     return ((series - series.rolling(window).mean()) / series.rolling(window).std()).rename(f"zscore_{window}")
 
 def vwap_deviation(price: pd.Series, vwap: pd.Series) -> pd.Series:
+    price = price.copy()
+    vwap = vwap.copy()
+    price.index = price.index.tz_localize(None) if price.index.tz is not None else price.index
+    vwap.index = vwap.index.tz_localize(None) if vwap.index.tz is not None else vwap.index
     return ((price - vwap) / vwap).rename("VWAP_Dev")
 
 def stochastic_volatility(returns: pd.Series) -> pd.Series:
@@ -78,6 +82,7 @@ class FeatureEngine:
     def build(self, prices: pd.DataFrame, returns: pd.DataFrame, vwap: pd.Series) -> pd.DataFrame:
         prices.index  = pd.to_datetime(prices.index,  utc=True)
         returns.index = pd.to_datetime(returns.index, utc=True)
+        vwap.index    = pd.to_datetime(vwap.index,    utc=True)
 
         gold_price = prices["XAUUSD"]  if "XAUUSD" in prices.columns  else prices.iloc[:, 0]
         gold_ret   = returns["XAUUSD"] if "XAUUSD" in returns.columns else returns.iloc[:, 0]
