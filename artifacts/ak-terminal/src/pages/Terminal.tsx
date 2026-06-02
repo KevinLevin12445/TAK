@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { TopTicker } from "@/components/TopTicker";
 import { QuantPanel } from "@/components/tabs/QuantPanel";
-import { TradeCalc } from "@/components/tabs/TradeCalc";
+import TradeCalc from "@/components/tabs/TradeCalc";
 import { Command } from "@/components/tabs/Command";
 import { KalmanTab } from "@/components/tabs/Kalman";
 import { HmmRegimes } from "@/components/tabs/HmmRegimes";

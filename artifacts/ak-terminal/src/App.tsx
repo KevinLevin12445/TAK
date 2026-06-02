@@ -5,19 +5,11 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import Terminal from "@/pages/Terminal";
 import NotFound from "@/pages/not-found";
 
-// AQUÍ ESTÁ LA CORRECCIÓN DE LA RUTA.
-// Asegúrate de que apunte a "tabs/TradeCalc" 
-import { TradeCalc } from "@/components/tabs/TradeCalc";
-
 const queryClient = new QueryClient();
 
 function Router() {
   return (
     <Switch>
-      {/* Si quieres aislar momentáneamente la calcu en "/" descomenta la siguiente línea */}
-      {/* <Route path="/" component={TradeCalc} /> */}
-      
-      {/* Tu ruta original */}
       <Route path="/" component={Terminal} />
       <Route component={NotFound} />
     </Switch>
